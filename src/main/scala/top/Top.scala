@@ -294,7 +294,7 @@ class XSTopWithoutDMA()(implicit p: Parameters) extends BaseXSSoc()
   }
   plic.intnode := beu.intNode
   plic.intnode := plicSource.sourceNode
-  
+
   plic.node := peripheralXbar
 
   val l3cache = if(useFakeL3Cache) null else LazyModule(new HuanCun()(new Config((_, _, _) => {
