@@ -282,10 +282,6 @@ trait HasXSParameter {
     )
   )
 
-<<<<<<< HEAD
-=======
-
->>>>>>> 3eb6b08f (Remove L2 preftecher)
   // load violation predict
   val ResetTimeMax2Pow = 20 //1078576
   val ResetTimeMin2Pow = 10 //1024
