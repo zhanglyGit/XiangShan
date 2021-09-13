@@ -135,6 +135,7 @@ trait HaveSlaveAXI4Port {
   errorDevice.node := error_xbar
   l3_xbar :=
     TLBuffer() :=
+    TLUserFixer() :=
     error_xbar
 
   val dma = InModuleBody {
@@ -315,7 +316,7 @@ class XSTopWithoutDMA()(implicit p: Parameters) extends BaseXSSoc()
   val debugIntSink = LazyModule(new IntSinkNodeToModule(NumCores))
   debugIntSink.sinkNode := debugModule.debug.dmOuter.dmOuter.intnode
   debugModule.debug.dmInner.dmInner.sb2tlOpt.foreach { sb2tl  =>
-    l3_xbar := TLBuffer() := TLWidthWidget(1) := sb2tl.node
+    l3_xbar := TLBuffer() := TLWidthWidget(1) := TLUserFixer() := sb2tl.node
   }
 
   lazy val module = new LazyRawModuleImp(this) {

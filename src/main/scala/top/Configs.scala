@@ -30,7 +30,7 @@ import xiangshan.backend.exu.ExuParameters
 import xiangshan.cache.{DCacheParameters, ICacheParameters, L1plusCacheParameters}
 import xiangshan.cache.mmu.L2TLBParameters
 import device.{EnableJtag, XSDebugModuleParams}
-import huancun.{CacheParameters, HCCacheParameters}
+import huancun.{CacheParameters, HCCacheParameters, PreferCacheField, PrefetchField, PrefetchKey}
 import huancun.prefetch._
 
 class DefaultConfig(n: Int) extends Config((site, here, up) => {
@@ -154,7 +154,8 @@ class WithNKBL2(n: Int, ways: Int = 8, inclusive: Boolean = true) extends Config
           ways = ways,
           sets = l2sets,
           inclusive = inclusive,
-          prefetch = Some(BOPParameters())
+          prefetch = Some(BOPParameters()),
+          reqField = Seq(PreferCacheField())
         ),
         useFakeL2Cache = false,
         useFakeDCache = false,
