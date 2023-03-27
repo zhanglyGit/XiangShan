@@ -214,8 +214,9 @@ class CtrlBlockImp(outer: CtrlBlock)(implicit p: Parameters) extends LazyModuleI
     val dispatch = Vec(3*dpParams.IntDqDeqWidth, DecoupledIO(new MicroOp))
     val rsReady = Vec(outer.dispatch2.map(_.module.io.out.length).sum, Input(Bool()))
     val enqLsq = Flipped(new LsqEnqIO)
-    val lqCancelCnt = Input(UInt(log2Up(LoadQueueSize + 1).W))
+    val lqCancelCnt = Input(UInt(log2Up(LoadQueueFlagSize + 1).W))
     val sqCancelCnt = Input(UInt(log2Up(StoreQueueSize + 1).W))
+    val lqDeq = Input(UInt(log2Up(CommitWidth + 1).W))
     val sqDeq = Input(UInt(log2Ceil(EnsbufferWidth + 1).W))
     val ld_pc_read = Vec(exuParameters.LduCnt, Flipped(new FtqRead(UInt(VAddrBits.W))))
 
@@ -277,6 +278,11 @@ class CtrlBlockImp(outer: CtrlBlock)(implicit p: Parameters) extends LazyModuleI
   val fpDq = Module(new DispatchQueue(dpParams.FpDqSize, RenameWidth, dpParams.FpDqDeqWidth))
   val lsDq = Module(new DispatchQueue(dpParams.LsDqSize, RenameWidth, dpParams.LsDqDeqWidth))
   val redirectGen = Module(new RedirectGenerator)
+  // jumpPc (2) + redirects (1) + loadPredUpdate (1) + jalr_target (1) + [ld pc (LduCnt)] + robFlush (1)
+  //val pcMem = Module(new SyncDataModuleTemplate(
+  //  new Ftq_RF_Components, FtqSize,
+  //  6 + exuParameters.LduCnt, 1, "CtrlPcMem")
+  //)
   val rob = outer.rob.module
 
   // jumpPc (2) + redirects (1) + loadPredUpdate (1) + jalr_target (1) + [ld pc (LduCnt)] + robWriteback (sum(writebackLengths)) + robFlush (1)
@@ -543,7 +549,7 @@ class CtrlBlockImp(outer: CtrlBlock)(implicit p: Parameters) extends LazyModuleI
       val lsqCtrl = Module(new LsqEnqCtrl)
       lsqCtrl.io.redirect <> redirectForExu
       lsqCtrl.io.enq <> dp2.enqLsq.get
-      lsqCtrl.io.lcommit := rob.io.lsq.lcommit
+      lsqCtrl.io.lcommit := io.lqDeq
       lsqCtrl.io.scommit := io.sqDeq
       lsqCtrl.io.lqCancelCnt := io.lqCancelCnt
       lsqCtrl.io.sqCancelCnt := io.sqCancelCnt

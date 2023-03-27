@@ -353,7 +353,7 @@ class XSCoreImp(outer: XSCoreBase) extends LazyModuleImp(outer)
   ctrlBlock.io.memoryViolation <> memBlock.io.memoryViolation
   intExuBlock.io.scheExtra.enqLsq.get <> memBlock.io.enqLsq
   exuBlocks.foreach(b => {
-    b.io.scheExtra.lcommit := ctrlBlock.io.robio.lsq.lcommit
+    b.io.scheExtra.lcommit := memBlock.io.lqDeq
     b.io.scheExtra.scommit := memBlock.io.sqDeq
     b.io.scheExtra.lqCancelCnt := memBlock.io.lqCancelCnt
     b.io.scheExtra.sqCancelCnt := memBlock.io.sqCancelCnt
@@ -372,6 +372,7 @@ class XSCoreImp(outer: XSCoreBase) extends LazyModuleImp(outer)
   ctrlBlock.io.dispatch <> exuBlocks.flatMap(_.io.in)
   ctrlBlock.io.rsReady := exuBlocks.flatMap(_.io.scheExtra.rsReady)
   ctrlBlock.io.enqLsq <> memBlock.io.enqLsq
+  ctrlBlock.io.lqDeq <> memBlock.io.lqDeq
   ctrlBlock.io.sqDeq := memBlock.io.sqDeq
   ctrlBlock.io.lqCancelCnt := memBlock.io.lqCancelCnt
   ctrlBlock.io.sqCancelCnt := memBlock.io.sqCancelCnt
@@ -485,6 +486,12 @@ class XSCoreImp(outer: XSCoreBase) extends LazyModuleImp(outer)
   memBlock.io.lsqio.rob <> ctrlBlock.io.robio.lsq
   memBlock.io.lsqio.exceptionAddr.isStore := CommitType.lsInstIsStore(ctrlBlock.io.robio.exception.bits.uop.ctrl.commitType)
   memBlock.io.debug_ls <> ctrlBlock.io.robio.debug_ls
+  for(i <- 0 until 2) {
+    memBlock.io.VecloadRegIn(i).bits := DontCare
+    memBlock.io.VecloadRegIn(i).valid := DontCare
+    //memBlock.io.vecFeedback
+    //memBlock.io.vecData.bits
+  }
 
   val itlbRepeater1 = PTWFilter(itlbParams.fenceDelay,frontend.io.ptw, fenceio.sfence, csrioIn.tlb, l2tlbParams.ifilterSize)
   val itlbRepeater2 = PTWRepeaterNB(passReady = false, itlbParams.fenceDelay, itlbRepeater1.io.ptw, ptw.io.tlb(0), fenceio.sfence, csrioIn.tlb)
