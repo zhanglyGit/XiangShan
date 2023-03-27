@@ -186,7 +186,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
   loadQueueReplay.io.sqEmpty <> io.sq.sqEmpty
   loadQueueReplay.io.lqFull <> io.lqReplayFull
   loadQueueReplay.io.tlbReplayDelayCycleCtrl <> io.tlbReplayDelayCycleCtrl
-  
+
   def toVec(a: UInt): Vec[Bool] = {
     VecInit(a.asBools)
   }
