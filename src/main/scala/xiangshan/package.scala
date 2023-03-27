@@ -19,30 +19,37 @@ import chisel3.util._
 import chipsalliance.rocketchip.config.Parameters
 import freechips.rocketchip.tile.XLen
 import xiangshan.ExceptionNO._
+import xiangshan.backend.issue._
 import xiangshan.backend.fu._
 import xiangshan.backend.fu.fpu._
+import xiangshan.backend.fu.vector._
 import xiangshan.backend.exu._
-import xiangshan.backend.Std
+import xiangshan.backend.{Std, ScheLaneConfig}
 
 package object xiangshan {
   object SrcType {
-    def reg = "b00".U
-    def pc  = "b01".U
-    def imm = "b01".U
-    def fp  = "b10".U
+    def imm = "b000".U
+    def pc  = "b000".U
+    def xp  = "b001".U
+    def fp  = "b010".U
+    def vp  = "b100".U
 
+    // alias
+    def reg = this.xp
     def DC  = imm // Don't Care
-    def X   = BitPat("b??")
+    def X   = BitPat("b000")
 
-    def isReg(srcType: UInt) = srcType===reg
     def isPc(srcType: UInt) = srcType===pc
     def isImm(srcType: UInt) = srcType===imm
+    def isReg(srcType: UInt) = srcType(0)
     def isFp(srcType: UInt) = srcType(1)
-    def isPcOrImm(srcType: UInt) = srcType(0)
-    def isRegOrFp(srcType: UInt) = !srcType(0)
-    def regIsFp(srcType: UInt) = srcType(1)
+    def isVp(srcType: UInt) = srcType(2)
+    def isPcOrImm(srcType: UInt) = isPc(srcType) || isImm(srcType)
 
-    def apply() = UInt(2.W)
+    def isNull(srcType: UInt) = !(isPcOrImm(srcType) || isReg(srcType) ||
+      isFp(srcType) || isVp(srcType))
+
+    def apply() = UInt(3.W)
   }
 
   object SrcState {
@@ -52,34 +59,44 @@ package object xiangshan {
     def apply() = UInt(1.W)
   }
 
+  // Todo: Use OH instead
   object FuType {
-    def jmp          = "b0000".U
-    def i2f          = "b0001".U
-    def csr          = "b0010".U
-    def alu          = "b0110".U
-    def mul          = "b0100".U
-    def div          = "b0101".U
-    def fence        = "b0011".U
-    def bku          = "b0111".U
+    def jmp          = "b00000".U
+    def i2f          = "b00001".U
+    def csr          = "b00010".U
+    def alu          = "b00110".U
+    def mul          = "b00100".U
+    def div          = "b00101".U
+    def fence        = "b00011".U
+    def bku          = "b00111".U
 
-    def fmac         = "b1000".U
-    def fmisc        = "b1011".U
-    def fDivSqrt     = "b1010".U
+    def fmac         = "b01000".U
+    def fmisc        = "b01011".U
+    def fDivSqrt     = "b01010".U
 
-    def ldu          = "b1100".U
-    def stu          = "b1101".U
-    def mou          = "b1111".U // for amo, lr, sc, fence
+    def ldu          = "b01100".U
+    def stu          = "b01101".U
+    def mou          = "b01111".U // for amo, lr, sc, fence
 
-    def X            = BitPat("b????")
+    def vipu         = "b10000".U
+    def vialuF       = "b10001".U // for VIALU Fixed-Point instructions
+    def vfpu         = "b11000".U
+    def vldu         = "b11100".U
+    def vstu         = "b11101".U
+    def vppu         = "b11001".U // for Permutation Unit
+    def X            = BitPat("b00000") // TODO: It may be a potential bug
 
-    def num = 14
+    def num = 19
 
     def apply() = UInt(log2Up(num).W)
 
-    def isIntExu(fuType: UInt) = !fuType(3)
+    // TODO: Optimize FuTpye and its method
+    // FIXME: Vector FuType coding is not ready
+    def isVecExu(fuType: UInt) = fuType(4)
+    def isIntExu(fuType: UInt) = !isVecExu(fuType) && !fuType(3)
     def isJumpExu(fuType: UInt) = fuType === jmp
-    def isFpExu(fuType: UInt) = fuType(3, 2) === "b10".U
-    def isMemExu(fuType: UInt) = fuType(3, 2) === "b11".U
+    def isFpExu(fuType: UInt) = !isVecExu(fuType) && (fuType(3, 2) === "b10".U)
+    def isMemExu(fuType: UInt) = !isVecExu(fuType) && (fuType(3, 2) === "b11".U)
     def isLoadStore(fuType: UInt) = isMemExu(fuType) && !fuType(1)
     def isStoreExu(fuType: UInt) = isMemExu(fuType) && fuType(0)
     def isAMO(fuType: UInt) = fuType(1)
@@ -87,7 +104,6 @@ package object xiangshan {
     def isSvinvalBegin(fuType: UInt, func: UInt, flush: Bool) = isFence(fuType) && func === FenceOpType.nofence && !flush
     def isSvinval(fuType: UInt, func: UInt, flush: Bool) = isFence(fuType) && func === FenceOpType.sfence && !flush
     def isSvinvalEnd(fuType: UInt, func: UInt, flush: Bool) = isFence(fuType) && func === FenceOpType.nofence && flush
-
 
     def jmpCanAccept(fuType: UInt) = !fuType(2)
     def mduCanAccept(fuType: UInt) = fuType(2) && !fuType(1) || fuType(2) && fuType(1) && fuType(0)
@@ -119,9 +135,27 @@ package object xiangshan {
     )
   }
 
+  def FuOpTypeWidth = 8
   object FuOpType {
-    def apply() = UInt(7.W)
-    def X = BitPat("b???????")
+    def apply() = UInt(FuOpTypeWidth.W)
+    def X = BitPat("b00000000")
+  }
+
+  // move VipuType and VfpuType into YunSuan/package.scala
+  // object VipuType {
+  //   def dummy = 0.U(7.W)
+  // }
+
+  // object VfpuType {
+  //   def dummy = 0.U(7.W)
+  // }
+
+  object VlduType {
+    def dummy = 0.U
+  }
+
+  object VstuType {
+    def dummy = 0.U
   }
 
   object CommitType {
@@ -318,6 +352,12 @@ package object xiangshan {
     def xorzexth   = "b110_0101".U
     def orcblsb    = "b110_0110".U
     def orcbzexth  = "b110_0111".U
+    def vsetvli1    = "b1000_0000".U
+    def vsetvli2    = "b1000_0100".U
+    def vsetvl1     = "b1000_0001".U
+    def vsetvl2     = "b1000_0101".U
+    def vsetivli1   = "b1000_0010".U
+    def vsetivli2   = "b1000_0110".U
 
     def isAddw(func: UInt) = func(6, 4) === "b001".U && !func(3) && !func(1)
     def isSimpleLogic(func: UInt) = func(6, 4) === "b100".U && !func(0)
@@ -326,8 +366,12 @@ package object xiangshan {
     def isBranch(func: UInt) = func(6, 4) === "b111".U
     def getBranchType(func: UInt) = func(3, 2)
     def isBranchInvert(func: UInt) = func(1)
+    def isVset(func: UInt) = func(7, 3) === "b1000_0".U
+    def isVsetvl(func: UInt) = isVset(func) && func(0)
+    def isVsetvli(func: UInt) = isVset(func) && !func(1, 0).orR
+    def vsetExchange(func: UInt) = Cat(func(7, 3), "b1".U, func(1, 0))
 
-    def apply() = UInt(7.W)
+    def apply() = UInt(FuOpTypeWidth.W)
   }
 
   object MDUOpType {
@@ -494,7 +538,7 @@ package object xiangshan {
 
   object SelImm {
     def IMM_X  = "b0111".U
-    def IMM_S  = "b0000".U
+    def IMM_S  = "b1110".U
     def IMM_SB = "b0001".U
     def IMM_U  = "b0010".U
     def IMM_UJ = "b0011".U
@@ -503,9 +547,41 @@ package object xiangshan {
     def INVALID_INSTR = "b0110".U
     def IMM_B6 = "b1000".U
 
-    def X      = BitPat("b????")
+    def IMM_OPIVIS = "b1001".U
+    def IMM_OPIVIU = "b1010".U
+    def IMM_VSETVLI   = "b1100".U
+    def IMM_VSETIVLI  = "b1101".U
+
+    def X      = BitPat("b0000")
 
     def apply() = UInt(4.W)
+  }
+
+  object UopDivType {
+    def SCA_SIM        = "b000000".U //
+    def DIR            = "b010001".U // dirty: vset
+    def VEC_VVV        = "b010010".U // VEC_VVV
+    def VEC_VXV        = "b010011".U // VEC_VXV
+    def VEC_0XV        = "b010100".U // VEC_0XV
+    def VEC_VVW        = "b010101".U // VEC_VVW
+    def VEC_WVW        = "b010110".U // VEC_WVW
+    def VEC_VXW        = "b010111".U // VEC_VXW
+    def VEC_WXW        = "b011000".U // VEC_WXW
+    def VEC_WVV        = "b011001".U // VEC_WVV
+    def VEC_WXV        = "b011010".U // VEC_WXV
+    def VEC_EXT2       = "b011011".U // VF2 0 -> V
+    def VEC_EXT4       = "b011100".U // VF4 0 -> V
+    def VEC_EXT8       = "b011101".U // VF8 0 -> V
+    def VEC_VVM        = "b011110".U // VEC_VVM
+    def VEC_VXM        = "b011111".U // VEC_VXM
+    def VEC_SLIDE1UP   = "b100000".U // slide1up.vx
+    def VEC_MMM        = "b000000".U // VEC_MMM
+    def dummy     = "b111111".U
+
+    def X = BitPat("b000000")
+
+    def apply() = UInt(6.W)
+    def needSplit(UopDivType: UInt) = UopDivType(4) || UopDivType(5)
   }
 
   object ExceptionNO {
@@ -575,6 +651,10 @@ package object xiangshan {
   def fdivSqrtGen(p: Parameters) = new FDivSqrt()(p)
   def stdGen(p: Parameters) = new Std()(p)
   def mouDataGen(p: Parameters) = new Std()(p)
+  def vipuGen(p: Parameters) = new VIPU()(p)
+  def vialuFGen(p: Parameters) = new VIAluFix()(p)
+  def vppuGen(p: Parameters) = new VPPU()(p)
+  def vfpuGen(p: Parameters) = new VFPU()(p)
 
   def f2iSel(uop: MicroOp): Bool = {
     uop.ctrl.rfWen
@@ -700,7 +780,7 @@ package object xiangshan {
   val fmacCfg = FuConfig(
     name = "fmac",
     fuGen = fmacGen,
-    fuSel = _ => true.B,
+    fuSel = (uop: MicroOp) => uop.ctrl.fuType === FuType.fmac,
     FuType.fmac, 0, 3, writeIntRf = false, writeFpRf = true, writeFflags = true,
     latency = UncertainLatency(), fastUopOut = true, fastImplemented = true
   )
@@ -772,11 +852,56 @@ package object xiangshan {
     latency = UncertainLatency()
   )
 
+  val vipuCfg = FuConfig(
+    name = "vipu",
+    fuGen = vipuGen,
+    fuSel = (uop: MicroOp) => FuType.vipu === uop.ctrl.fuType,
+    fuType = FuType.vipu,
+    numIntSrc = 0, numFpSrc = 0, writeIntRf = false, writeFpRf = false, writeFflags = false, writeVxsat = true,
+    numVecSrc = 4, writeVecRf = true,
+    fastUopOut = false, // TODO: check
+    fastImplemented = true, //TODO: check
+  )
+
+  val vialuFCfg = FuConfig(
+    name = "vialuF",
+    fuGen = vialuFGen,
+    fuSel = (uop: MicroOp) => FuType.vialuF === uop.ctrl.fuType,
+    fuType = FuType.vialuF,
+    numIntSrc = 0, numFpSrc = 0, writeIntRf = false, writeFpRf = false, writeFflags = false, writeVxsat = true,
+    numVecSrc = 4, writeVecRf = true,
+    fastUopOut = false, // TODO: check
+    fastImplemented = true, //TODO: check
+  )
+
+  val vppuCfg = FuConfig(
+    name = "vppu",
+    fuGen = vppuGen,
+    fuSel = (uop: MicroOp) => FuType.vppu === uop.ctrl.fuType,
+    fuType = FuType.vppu,
+    numIntSrc = 0, numFpSrc = 1, writeIntRf = false, writeFpRf = false, writeFflags = false,
+    numVecSrc = 1, writeVecRf = true,
+    fastUopOut = false, // TODO: check
+    fastImplemented = true, //TODO: check
+  )
+
+  val vfpuCfg = FuConfig(
+    name = "vfpu",
+    fuGen = vfpuGen,
+    fuSel = (uop: MicroOp) => FuType.vfpu === uop.ctrl.fuType,
+    fuType = FuType.vfpu,
+    numIntSrc = 0, numFpSrc = 1, writeIntRf = false, writeFpRf = false, writeFflags = true,
+    numVecSrc = 3, writeVecRf = true,
+    fastUopOut = false, // TODO: check
+    fastImplemented = true, //TODO: check
+    // latency = CertainLatency(2)
+  )
+
   val JumpExeUnitCfg = ExuConfig("JmpExeUnit", "Int", Seq(jmpCfg, i2fCfg), 2, Int.MaxValue)
   val AluExeUnitCfg = ExuConfig("AluExeUnit", "Int", Seq(aluCfg), 0, Int.MaxValue)
   val JumpCSRExeUnitCfg = ExuConfig("JmpCSRExeUnit", "Int", Seq(jmpCfg, csrCfg, fenceCfg, i2fCfg), 2, Int.MaxValue)
   val MulDivExeUnitCfg = ExuConfig("MulDivExeUnit", "Int", Seq(mulCfg, divCfg, bkuCfg), 1, Int.MaxValue)
-  val FmacExeUnitCfg = ExuConfig("FmacExeUnit", "Fp", Seq(fmacCfg), Int.MaxValue, 0)
+  val FmacExeUnitCfg = ExuConfig("FmacExeUnit", "Fp", Seq(fmacCfg, vipuCfg, vppuCfg, vfpuCfg, vialuFCfg), Int.MaxValue, 0)
   val FmiscExeUnitCfg = ExuConfig(
     "FmiscExeUnit",
     "Fp",
@@ -786,4 +911,49 @@ package object xiangshan {
   val LdExeUnitCfg = ExuConfig("LoadExu", "Mem", Seq(lduCfg), wbIntPriority = 0, wbFpPriority = 0, extendsExu = false)
   val StaExeUnitCfg = ExuConfig("StaExu", "Mem", Seq(staCfg, mouCfg), wbIntPriority = Int.MaxValue, wbFpPriority = Int.MaxValue, extendsExu = false)
   val StdExeUnitCfg = ExuConfig("StdExu", "Mem", Seq(stdCfg, mouDataCfg), wbIntPriority = Int.MaxValue, wbFpPriority = Int.MaxValue, extendsExu = false)
+
+  // def jumpRSWrapperGen(p: Parameters) = new JumpRSWrapper()(p)
+  // def mulRSWrapperGen(p: Parameters) = new MulRSWrapper()(p)
+  // def loadRSWrapperGen(p: Parameters) = new LoadRSWrapper()(p)
+  // def stdRSWrapperGen(p: Parameters) = new StdRSWrapper()(p)
+  // def staRSWrapperGen(p: Parameters) = new StaRSWrapper()(p)
+  // def fmaRSWrapperGen(p: Parameters) = new FMARSWrapper()(p)
+  // def fmiscRSWrapperGen(p: Parameters) = new FMiscRSWrapper()(p)
+
+  val aluRSMod = new RSMod(
+    rsWrapperGen = (modGen: RSMod, p: Parameters) => new ALURSWrapper(modGen)(p),
+    rsGen = (a: RSParams, b: Parameters) => new ALURS(a)(b),
+    immExtractorGen = (src: Int, width: Int, p: Parameters) => new AluImmExtractor()(p)
+  )
+  val fmaRSMod = new RSMod(
+    rsWrapperGen = (modGen: RSMod, p: Parameters) => new FMARSWrapper(modGen)(p),
+    rsGen = (a: RSParams, b: Parameters) => new FMARS(a)(b),
+  )
+  val fmiscRSMod = new RSMod(
+    rsWrapperGen = (modGen: RSMod, p: Parameters) => new FMiscRSWrapper(modGen)(p),
+    rsGen = (a: RSParams, b: Parameters) => new FMiscRS(a)(b),
+  )
+  val jumpRSMod = new RSMod(
+    rsWrapperGen = (modGen: RSMod, p: Parameters) => new JumpRSWrapper(modGen)(p),
+    rsGen = (a: RSParams, b: Parameters) => new JumpRS(a)(b),
+    immExtractorGen = (src: Int, width: Int, p: Parameters) => new JumpImmExtractor()(p)
+  )
+  val loadRSMod = new RSMod(
+    rsWrapperGen = (modGen: RSMod, p: Parameters) => new LoadRSWrapper(modGen)(p),
+    rsGen = (a: RSParams, b: Parameters) => new LoadRS(a)(b),
+    immExtractorGen = (src: Int, width: Int, p: Parameters) => new LoadImmExtractor()(p)
+  )
+  val mulRSMod = new RSMod(
+    rsWrapperGen = (modGen: RSMod, p: Parameters) => new MulRSWrapper(modGen)(p),
+    rsGen = (a: RSParams, b: Parameters) => new MulRS(a)(b),
+    immExtractorGen = (src: Int, width: Int, p: Parameters) => new MduImmExtractor()(p)
+  )
+  val staRSMod = new RSMod(
+    rsWrapperGen = (modGen: RSMod, p: Parameters) => new StaRSWrapper(modGen)(p),
+    rsGen = (a: RSParams, b: Parameters) => new StaRS(a)(b),
+  )
+  val stdRSMod = new RSMod(
+    rsWrapperGen = (modGen: RSMod, p: Parameters) => new StdRSWrapper(modGen)(p),
+    rsGen = (a: RSParams, b: Parameters) => new StdRS(a)(b),
+  )
 }

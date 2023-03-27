@@ -123,6 +123,10 @@ object difftest extends XSModule with SbtModule {
   override def millSourcePath = os.pwd / "difftest"
 }
 
+object yunsuan extends XSModule with SbtModule {
+  override def millSourcePath = os.pwd / "yunsuan"
+}
+
 object fudian extends XSModule with SbtModule
 
 object utility extends XSModule with SbtModule {
@@ -141,12 +145,13 @@ trait CommonXiangShan extends XSModule with SbtModule { m =>
   def rocketModule: PublishModule
   def difftestModule: PublishModule
   def huancunModule: PublishModule
+  def yunsuanModule: PublishModule
   def fudianModule: PublishModule
   def utilityModule: PublishModule
 
   override def millSourcePath = os.pwd
 
-  override def forkArgs = Seq("-Xmx64G", "-Xss256m")
+  override def forkArgs = Seq("-Xmx100G", "-Xss256m")
 
   override def ivyDeps = super.ivyDeps() ++ Seq(ivys.chiseltest)
 
@@ -154,6 +159,7 @@ trait CommonXiangShan extends XSModule with SbtModule { m =>
     rocketModule,
     difftestModule,
     huancunModule,
+    yunsuanModule,
     fudianModule,
     utilityModule
   )
@@ -174,6 +180,7 @@ object XiangShan extends CommonXiangShan {
   override def rocketModule = rocketchip
   override def difftestModule = difftest
   override def huancunModule = huancun
+  override def yunsuanModule = yunsuan
   override def fudianModule = fudian
   override def utilityModule = utility
 }

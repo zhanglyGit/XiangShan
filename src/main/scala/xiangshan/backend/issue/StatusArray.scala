@@ -40,7 +40,6 @@ class StatusEntry(params: RSParams)(implicit p: Parameters) extends XSBundle {
   val blocked = Bool()
   val credit = UInt(4.W)
   val srcState = Vec(params.numSrc, Bool())
-  val midState = Bool()
   // data
   val psrc = Vec(params.numSrc, UInt(params.dataIdBits.W))
   val srcType = Vec(params.numSrc, SrcType())
@@ -56,14 +55,11 @@ class StatusEntry(params: RSParams)(implicit p: Parameters) extends XSBundle {
   def canIssue: Bool = {
     val scheduledCond = if (params.needScheduledBit) !scheduled else true.B
     val blockedCond = if (params.checkWaitBit) !blocked else true.B
-    val checkedSrcState = if (params.numSrc > 2) srcState.take(2) else srcState
-    val midStateReady = if (params.hasMidState) srcState.last && midState else false.B
-    (VecInit(checkedSrcState).asUInt.andR && scheduledCond || midStateReady) && blockedCond
+    srcState.asUInt.andR && scheduledCond && blockedCond
   }
 
   def allSrcReady: Bool = {
-    val midStateReady = if (params.hasMidState) srcState.last && midState else false.B
-    srcState.asUInt.andR || midStateReady
+    srcState.asUInt.andR
   }
 
   override def toPrintable: Printable = {
@@ -88,7 +84,6 @@ class StatusArray(params: RSParams)(implicit p: Parameters) extends XSModule
     // TODO: if more info is needed, put them in a bundle
     val isFirstIssue = Vec(params.numSelect, Output(Bool()))
     val allSrcReady = Vec(params.numSelect, Output(Bool()))
-    val updateMidState = Input(UInt(params.numEntries.W))
     val deqRespWidth = if (params.hasFeedback) params.numDeq * 2 else params.numDeq + params.numDeq + 1
     val deqResp = Vec(deqRespWidth, Flipped(ValidIO(new Bundle {
       val rsMask = UInt(params.numEntries.W)
@@ -123,14 +118,14 @@ class StatusArray(params: RSParams)(implicit p: Parameters) extends XSModule
   // update srcState when enqueue, wakeup
   // For better timing, we use different conditions for data write and srcState update
   // srcInfo: (psrc, srcType)
-  def wakeupMatch(srcInfo: (UInt, UInt)): (Bool, UInt) = {
+  def wakeupMatch(srcInfo: (Bool, (UInt, UInt))): (Bool, UInt) = {
     val (stateMatchVec, dataMatchVec) = io.wakeup.map(w => {
-      val (stateMatch, dataMatch) = w.bits.wakeup(Seq(srcInfo), params.exuCfg.get).head
+      val (stateMatch, dataMatch) = w.bits.wakeup(Seq(srcInfo._2), params.exuCfg.get).head
       (w.valid && stateMatch, w.valid && dataMatch)
     }).unzip
     val stateMatch = VecInit(stateMatchVec).asUInt.orR
     val dataMatch = VecInit(dataMatchVec).asUInt
-    XSError(PopCount(dataMatchVec) > 1.U, p"matchVec ${Binary(dataMatch)} should be one-hot\n")
+    XSError(PopCount(dataMatchVec) > 1.U && srcInfo._1, p"matchVec ${Binary(dataMatch)} should be one-hot\n")
     (stateMatch, dataMatch)
   }
 
@@ -227,17 +222,17 @@ class StatusArray(params: RSParams)(implicit p: Parameters) extends XSModule
       p"instructions $i with credit ${status.credit} must not be scheduled\n")
 
     // srcState: indicate whether the operand is ready for issue
-    val (stateWakeupEn, dataWakeupEnVec) = statusNext.psrc.zip(statusNext.srcType).map(wakeupMatch).unzip
+    val (stateWakeupEn, dataWakeupEnVec) = statusArrayValidNext.zip(statusNext.psrc.zip(statusNext.srcType)).map(wakeupMatch).unzip
     io.wakeupMatch(i) := dataWakeupEnVec.map(en => Mux(updateValid(i) || statusValid, en, 0.U))
     // For best timing of srcState, we don't care whether the instruction is valid or not.
     // We also don't care whether the instruction can really enqueue.
     statusNext.srcState := VecInit(status.srcState.zip(updateVal(i).srcState).zip(stateWakeupEn).map {
       // When the instruction enqueues, we always use the wakeup result.
-      case ((current, update), wakeup) => wakeup || Mux(updateValid(i), update, current)
+      case ((current, update), wakeup) => {
+        // XSError(wakeup && Mux(updateValid(i), update, current), s"should not wakeup rdy entry index:$i")
+        wakeup || Mux(updateValid(i), update, current)
+      }
     })
-
-    // midState: reset when enqueue; set when receiving feedback
-    statusNext.midState := !updateValid(i) && (io.updateMidState(i) || status.midState)
 
     // static data fields (only updated when instructions enqueue)
     statusNext.psrc := Mux(updateValid(i), updateVal(i).psrc, status.psrc)
@@ -250,6 +245,7 @@ class StatusArray(params: RSParams)(implicit p: Parameters) extends XSModule
     statusNext.isFirstIssue := Mux(hasIssued, false.B, updateValid(i) || status.isFirstIssue)
 
     XSDebug(statusValid, p"entry[$i]: $status\n")
+    XSError(statusValid && Cat(status.srcType.map(SrcType.isNull)).orR, p"Error src Type, entry[$i]: $status")
   }
 
   io.isValid := statusArrayValid.asUInt

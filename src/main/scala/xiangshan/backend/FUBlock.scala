@@ -25,7 +25,7 @@ import utility._
 import xiangshan._
 import xiangshan.backend.exu._
 import xiangshan.backend.fu.CSRFileIO
-import xiangshan.backend.fu.fpu.FMAMidResultIO
+import freechips.rocketchip.diplomacy.{LazyModule, LazyModuleImp}
 
 class WakeUpBundle(numFast: Int, numSlow: Int)(implicit p: Parameters) extends XSBundle {
   val fastUops = Vec(numFast, Flipped(ValidIO(new MicroOp)))
@@ -34,80 +34,152 @@ class WakeUpBundle(numFast: Int, numSlow: Int)(implicit p: Parameters) extends X
 
 }
 
-class FUBlockExtraIO(configs: Seq[(ExuConfig, Int)])(implicit p: Parameters) extends XSBundle {
-  val hasCSR = configs.map(_._1).contains(JumpCSRExeUnitCfg)
-  val hasFence = configs.map(_._1).contains(JumpCSRExeUnitCfg)
-  val hasFrm = configs.map(_._1).contains(FmacExeUnitCfg) || configs.map(_._1).contains(FmiscExeUnitCfg)
-  val numRedirectOut = configs.filter(_._1.hasRedirect).map(_._2).sum
+class FUBlockExtraIO(implicit p: Parameters) extends XSBundle
 
-  val exuRedirect = Vec(numRedirectOut, ValidIO(new ExuOutput))
-  val csrio = if (hasCSR) Some(new CSRFileIO) else None
-  val fenceio = if (hasFence) Some(new FenceIO) else None
-  val frm = if (hasFrm) Some(Input(UInt(3.W))) else None
+abstract class FUBlock(configs: Seq[(ExuConfig, Int)])(implicit p: Parameters) extends LazyModule with HasXSParameter {
+  require(configs.map(_._1).filter(a => a.readFpVecRf && a.readIntRf).isEmpty)
 
+  val configIntIn = configs.filter{a => a._1.readIntRf}
+  val configVecIn = configs.filter{a => a._1.readFpVecRf}
+  val configIntOut = configs.filter{a => a._1.readIntRf && a._1.writeIntRf}
+  val configVecOut = configs.filter{a => (a._1.readFpVecRf) && a._1.writeFpVecRf}
+
+  val numIntIn = configIntIn.map(_._2).sum
+  val numVecIn = configVecIn.map(_._2).sum
+  // If only write but not read, the op is data move cross domain or i2f/f2i
+  val numIntOut = configIntOut.map(_._2).sum
+  val numVecOut = configVecOut.map(_._2).sum
+
+  val numIn = configs.map(_._2).sum
+  require(numIn == (numIntIn + numVecIn))
+  // val numFma = configs.filter(_._1 == FmacExeUnitCfg).map(_._2).sum
+  // val isVpu = configs.map(_._1.isVPU).reduce(_ || _)
+
+  lazy val module = new FUBlockImp(configs, this)
+
+  println("FUBlock IO.issue & IO.Writeback")
+  if (numIntIn > 0) println(s"  numIntIn: ${numIntIn} " + configIntIn.map(a => a._1.name + "*" + a._2).reduce(_ + " " + _))
+  if (numIntOut > 0) println(s"  numIntOut: ${numIntOut} " + configIntOut.map(a => a._1.name + "*" + a._2).reduce(_ + " " + _))
+  if (numVecIn > 0) println(s"  numVecIn: ${numVecIn} " + configVecIn.map(a => a._1.name + "*" + a._2).reduce(_ + " " + _))
+  if (numVecOut > 0) println(s"  numVecOut: ${numVecOut} " + configVecOut.map(a => a._1.name + "*" + a._2).reduce(_ + " " + _))
 }
 
-class FUBlock(configs: Seq[(ExuConfig, Int)])(implicit p: Parameters) extends XSModule {
-  val numIn = configs.map(_._2).sum
-  val numFma = configs.filter(_._1 == FmacExeUnitCfg).map(_._2).sum
+class FUBlockImp(configs: Seq[(ExuConfig, Int)], outer: FUBlock)(implicit p: Parameters)
+extends LazyModuleImp(outer) with HasXSParameter {
+
+  def SeqConnect[T <: Data](lhs: Seq[T], rhs: Seq[T]) {
+    for ((l, r) <- lhs.zip(rhs)) { l <> r }
+  }
 
   val io = IO(new Bundle {
     val redirect = Flipped(ValidIO(new Redirect))
     // in
-    val issue = Vec(numIn, Flipped(DecoupledIO(new ExuInput)))
+    val issueInt = Vec(outer.numIntIn, Flipped(DecoupledIO(new ExuInput(false))))
+    val issueVec = Vec(outer.numVecIn, Flipped(DecoupledIO(new ExuInput(true))))
     // out
-    val writeback = Vec(numIn, DecoupledIO(new ExuOutput))
-    // misc
-    val extra = new FUBlockExtraIO(configs)
-    val fmaMid = if (numFma > 0) Some(Vec(numFma, new FMAMidResultIO)) else None
+    val writebackInt = Vec(outer.numIntOut, DecoupledIO(new ExuOutput(false)))
+    val writebackVec = Vec(outer.numVecOut, DecoupledIO(new ExuOutput(true)))
+
+    def issue = issueInt ++ issueVec
+    def writeback = writebackInt ++ writebackVec
   })
 
   val exuDefs = configs.map(_._1).map(ExeUnitDef(_))
   val exeUnits = configs.zip(exuDefs).map(x => Seq.fill(x._1._2)(Instance(x._2))).reduce(_ ++ _)
   val intExeUnits = exeUnits.filter(_.config.readIntRf)
-  // TODO: deal with Std units
   val fpExeUnits = exeUnits.filterNot(_.config.readIntRf)
-  val stdExeUnits = exeUnits.filter(_.config.readIntRf).filter(_.config.readFpRf)
-  stdExeUnits.foreach(_.io.fromFp := DontCare)
-  io.issue <> intExeUnits.map(_.io.fromInt) ++ fpExeUnits.map(_.io.fromFp)
-  io.writeback <> exeUnits.map(_.io.out)
+  SeqConnect(io.issue, intExeUnits.map(_.io.fromInt) ++ fpExeUnits.map(_.io.fromFp))
+  SeqConnect(io.writeback, exeUnits.map(_.io.out))
+
+  for ((exu, i) <- exeUnits.zipWithIndex) {
+    exu.io.redirect <> RegNextWithEnable(io.redirect)
+  }
+
+  for ((iss, i) <- (io.issue.zipWithIndex)) {
+    XSPerfAccumulate(s"issue_count_$i", iss.fire())
+  }
+  XSPerfHistogram("writeback_count", PopCount(io.writeback.map(_.fire())), true.B, 0, outer.numIn, 1)
+
+}
+
+class IntFUBlockExtraIO(configs: Seq[(ExuConfig, Int)])(implicit p: Parameters) extends FUBlockExtraIO {
+  val numRedirectOut = configs.filter(_._1.hasRedirect).map(_._2).sum
+
+  val exuRedirect = Vec(numRedirectOut, ValidIO(new ExuOutput))
+  val csrio = new CSRFileIO
+  val fenceio = new FenceIO
+
+  require(configs.map(_._1).contains(JumpCSRExeUnitCfg))
+  require(!configs.map(_._1).contains(FmacExeUnitCfg) || configs.map(_._1).contains(FmiscExeUnitCfg))
+  require(numRedirectOut > 0)
+  override def toString: String = {
+    s"IntFUBlockExtraIO: " + configs.map(a => a._1.name + "*" + a._2).reduce(_ + " " + _) + s" hasCSR hasFence numRedOut:${numRedirectOut}"
+  }
+}
+
+class IntFUBlock(configVec: Seq[(ExuConfig, Int)])(implicit p: Parameters) extends FUBlock(configVec) {
+  override lazy val module = new IntFUBlockImp(configVec, this)
+}
+
+class IntFUBlockImp(configVec: Seq[(ExuConfig, Int)], out: IntFUBlock)(implicit p: Parameters) extends FUBlockImp(configVec, out) {
+  val extraio = IO(new IntFUBlockExtraIO(configVec))
 
   // to please redirectGen
-  io.extra.exuRedirect.zip(exeUnits.reverse.filter(_.config.hasRedirect).map(_.io.out)).foreach {
+  extraio.exuRedirect.zip(exeUnits.reverse.filter(_.config.hasRedirect).map(_.io.out)).foreach {
     case (x, y) =>
       x.valid := y.fire() && y.bits.redirectValid
       x.bits := y.bits
   }
 
   for ((exu, i) <- exeUnits.zipWithIndex) {
-    exu.io.redirect <> RegNextWithEnable(io.redirect)
-
     if (exu.csrio.isDefined) {
-      exu.csrio.get <> io.extra.csrio.get
-      exu.csrio.get.perf <> RegNext(io.extra.csrio.get.perf)
+      exu.csrio.get <> extraio.csrio
+      exu.csrio.get.perf <> RegNext(extraio.csrio.perf)
       // RegNext customCtrl for better timing
-      io.extra.csrio.get.customCtrl := RegNext(RegNext(exu.csrio.get.customCtrl))
-      io.extra.csrio.get.tlb := RegNext(RegNext(exu.csrio.get.tlb))
+      extraio.csrio.customCtrl := RegNext(RegNext(exu.csrio.get.customCtrl))
+      extraio.csrio.tlb := RegNext(RegNext(exu.csrio.get.tlb))
       // RegNext csrUpdate
-      exu.csrio.get.distributedUpdate := RegNext(io.extra.csrio.get.distributedUpdate)
+      exu.csrio.get.distributedUpdate := RegNext(extraio.csrio.distributedUpdate)
     }
 
     if (exu.fenceio.isDefined) {
-      exu.fenceio.get <> io.extra.fenceio.get
+      exu.fenceio.get <> extraio.fenceio
     }
+  }
+  println(extraio)
+}
 
+class VecFUBlockExtraIO(configs: Seq[(ExuConfig, Int)])(implicit p: Parameters) extends FUBlockExtraIO {
+  require(!configs.map(_._1).contains(JumpCSRExeUnitCfg))
+  require(configs.map(_._1).contains(FmacExeUnitCfg) || configs.map(_._1).contains(FmiscExeUnitCfg))
+  require(configs.filter(_._1.hasRedirect).map(_._2).sum == 0)
+
+  val frm = Input(UInt(3.W))
+  val vxrm = Input(UInt(2.W))
+  val vstart = Input(UInt(XLEN.W))
+
+  override def toString: String = {
+    s"VecFUBlockExtraIO: " + configs.map(a => a._1.name + "*" + a._2).reduce(_ + " " + _) + s" hasFrm"
+  }
+}
+
+class VecFUBlock(configVec: Seq[(ExuConfig, Int)])(implicit p: Parameters) extends FUBlock(configVec) {
+  override lazy val module = new VecFUBlockImp(configVec, this)
+}
+
+class VecFUBlockImp(configVec: Seq[(ExuConfig, Int)], out: VecFUBlock)(implicit p: Parameters) extends FUBlockImp(configVec, out) {
+  val extraio = IO(new VecFUBlockExtraIO(configVec))
+
+  for ((exu, i) <- exeUnits.zipWithIndex) {
     if (exu.frm.isDefined) {
-      exu.frm.get := io.extra.frm.get
+      exu.frm.get := extraio.frm
+    }
+    if (exu.vxrm.isDefined){
+      exu.vxrm.get := extraio.vxrm
+    }
+    if (exu.vstart.isDefined) {
+      exu.vstart.get := extraio.vstart
     }
   }
-
-  if (io.fmaMid.isDefined) {
-    io.fmaMid.get <> exeUnits.map(_.fmaMid).filter(_.isDefined).map(_.get)
-  }
-
-  for ((iss, i) <- io.issue.zipWithIndex) {
-    XSPerfAccumulate(s"issue_count_$i", iss.fire())
-  }
-  XSPerfHistogram("writeback_count", PopCount(io.writeback.map(_.fire())), true.B, 0, numIn, 1)
-
+  println(extraio)
 }

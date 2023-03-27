@@ -1221,6 +1221,7 @@ class LoadUnit(implicit p: Parameters) extends XSModule
   hitLoadOut.bits.debug.paddr := s3_loadOutBits.paddr
   hitLoadOut.bits.debug.vaddr := s3_loadOutBits.vaddr
   hitLoadOut.bits.fflags := DontCare
+  hitLoadOut.bits.vxsat := DontCare
 
   when (s3_forceReplay) {
     hitLoadOut.bits.uop.cf.exceptionVec := 0.U.asTypeOf(s3_loadOutBits.uop.cf.exceptionVec.cloneType)

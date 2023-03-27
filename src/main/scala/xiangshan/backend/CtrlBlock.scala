@@ -32,7 +32,9 @@ import xiangshan.frontend.{FtqPtr, FtqRead, Ftq_RF_Components}
 import xiangshan.mem.mdp.{LFST, SSIT, WaitTable}
 import xiangshan.ExceptionNO._
 import xiangshan.backend.exu.ExuConfig
+import xiangshan.backend.regfile.RfReadPort
 import xiangshan.mem.{LsqEnqCtrl, LsqEnqIO}
+import xiangshan.backend.decode.VectorConstants
 
 class CtrlToFtqIO(implicit p: Parameters) extends XSBundle {
   def numRedirect = exuParameters.JmpCnt + exuParameters.AluCnt
@@ -199,6 +201,7 @@ class CtrlBlockImp(outer: CtrlBlock)(implicit p: Parameters) extends LazyModuleI
   with HasCircularQueuePtrHelper
   with HasWritebackSourceImp
   with HasPerfEvents
+  with VectorConstants
 {
   val writebackLengths = outer.writebackSinksParams.map(_.length)
 
@@ -216,6 +219,8 @@ class CtrlBlockImp(outer: CtrlBlock)(implicit p: Parameters) extends LazyModuleI
     val lqDeq = Input(UInt(log2Up(CommitWidth + 1).W))
     val sqDeq = Input(UInt(log2Ceil(EnsbufferWidth + 1).W))
     val ld_pc_read = Vec(exuParameters.LduCnt, Flipped(new FtqRead(UInt(VAddrBits.W))))
+
+    val vconfigReadPort = Flipped(new RfReadPort(XLEN, PhyRegIdxWidth))
     // from int block
     val exuRedirect = Vec(exuParameters.AluCnt + exuParameters.JmpCnt, Flipped(ValidIO(new ExuOutput)))
     val stIn = Vec(exuParameters.StuCnt, Flipped(ValidIO(new ExuInput)))
@@ -245,6 +250,8 @@ class CtrlBlockImp(outer: CtrlBlock)(implicit p: Parameters) extends LazyModuleI
     val redirect = ValidIO(new Redirect)
     val debug_int_rat = Vec(32, Output(UInt(PhyRegIdxWidth.W)))
     val debug_fp_rat = Vec(32, Output(UInt(PhyRegIdxWidth.W)))
+    val debug_vec_rat = Vec(32, Output(UInt(PhyRegIdxWidth.W))) // TODO: use me
+    val debug_vconfig_rat = Output(UInt(PhyRegIdxWidth.W)) // TODO: use me
   })
 
   override def writebackSource: Option[Seq[Seq[Valid[ExuOutput]]]] = {
@@ -298,6 +305,18 @@ class CtrlBlockImp(outer: CtrlBlock)(implicit p: Parameters) extends LazyModuleI
   val flushRedirectReg = Wire(Valid(new Redirect))
   flushRedirectReg.valid := RegNext(flushRedirect.valid, init = false.B)
   flushRedirectReg.bits := RegEnable(flushRedirect.bits, flushRedirect.valid)
+
+  val isCommitWriteVconfigVec = rob.io.rabCommits.commitValid.zip(rob.io.rabCommits.info).map { case (valid, info) => valid && info.ldest === INT_VCONFIG.U && info.rfWen }.reverse
+  val commitPdestReverse = rob.io.rabCommits.info.map(info => info.pdest).reverse
+  val commitSel = PriorityMux(isCommitWriteVconfigVec, commitPdestReverse)
+  val isWalkWriteVconfigVec = rob.io.rabCommits.walkValid.zip(rob.io.rabCommits.info).map { case (valid, info) => valid && info.ldest === INT_VCONFIG.U && info.rfWen }.reverse
+  val walkPdestReverse = rob.io.rabCommits.info.map(info => info.pdest).reverse
+  val walkSel = PriorityMux(isWalkWriteVconfigVec, walkPdestReverse)
+  val vconfigAddr = Mux(rob.io.isVsetFlushPipe, rob.io.vconfigPdest,
+                      Mux(rob.io.rabCommits.isCommit, commitSel, walkSel))
+  io.vconfigReadPort.addr := RegNext(vconfigAddr)
+  decode.io.vconfig := io.vconfigReadPort.data(15, 0).asTypeOf(new VConfig)
+  decode.io.isVsetFlushPipe := RegNext(rob.io.isVsetFlushPipe)
 
   val stage2Redirect = Mux(flushRedirect.valid, flushRedirect, redirectGen.io.stage2Redirect)
   // Redirect will be RegNext at ExuBlocks.
@@ -373,11 +392,11 @@ class CtrlBlockImp(outer: CtrlBlock)(implicit p: Parameters) extends LazyModuleI
     val MissPredPending = RegInit(false.B); val branch_resteers_cycles = RegInit(false.B) // frontend_bound->fetch_lantency->stage2_redirect->branch_resteers
     val RobFlushPending = RegInit(false.B); val robFlush_bubble_cycles = RegInit(false.B) // frontend_bound->fetch_lantency->stage2_redirect->robflush_bubble
     val LdReplayPending = RegInit(false.B); val ldReplay_bubble_cycles = RegInit(false.B) // frontend_bound->fetch_lantency->stage2_redirect->ldReplay_bubble
-    
+
     when(redirectGen.io.isMisspreRedirect) { MissPredPending := true.B }
     when(flushRedirect.valid)              { RobFlushPending := true.B }
     when(redirectGen.io.loadReplay.valid)  { LdReplayPending := true.B }
-    
+
     when (RegNext(io.frontend.toFtq.redirect.valid)) {
       when(pendingRedirect) {                             stage2_redirect_cycles := true.B }
       when(MissPredPending) { MissPredPending := false.B; branch_resteers_cycles := true.B }
@@ -400,16 +419,20 @@ class CtrlBlockImp(outer: CtrlBlock)(implicit p: Parameters) extends LazyModuleI
   }
 
   decode.io.in <> io.frontend.cfVec
+  decode.io.in.zip(io.frontend.cfVec).map{ case (decodeIn, cf) => decodeIn.valid := cf.valid && !pendingRedirect}
   decode.io.csrCtrl := RegNext(io.csrCtrl)
   decode.io.intRat <> rat.io.intReadPorts
   decode.io.fpRat <> rat.io.fpReadPorts
+  decode.io.vecRat <> rat.io.vecReadPorts
+  decode.io.isRedirect <> stage2Redirect.valid
+  decode.io.robCommits <> rob.io.commits
 
   // memory dependency predict
   // when decode, send fold pc to mdp
   for (i <- 0 until DecodeWidth) {
     val mdp_foldpc = Mux(
       decode.io.out(i).fire,
-      decode.io.in(i).bits.foldpc,
+      decode.io.out(i).bits.cf.foldpc,
       rename.io.in(i).bits.cf.foldpc
     )
     ssit.io.raddr(i) := mdp_foldpc
@@ -429,19 +452,24 @@ class CtrlBlockImp(outer: CtrlBlock)(implicit p: Parameters) extends LazyModuleI
   lfst.io.dispatch <> dispatch.io.lfst
 
   rat.io.redirect := stage2Redirect.valid
-  rat.io.robCommits := rob.io.commits
+  rat.io.robCommits := rob.io.rabCommits
+  rat.io.diffCommits := rob.io.diffCommits
   rat.io.intRenamePorts := rename.io.intRenamePorts
   rat.io.fpRenamePorts := rename.io.fpRenamePorts
-  rat.io.debug_int_rat <> io.debug_int_rat
-  rat.io.debug_fp_rat <> io.debug_fp_rat
+  rat.io.vecRenamePorts := rename.io.vecRenamePorts
+
+  io.debug_int_rat := rat.io.debug_int_rat
+  io.debug_fp_rat := rat.io.debug_fp_rat
+  io.debug_vec_rat := rat.io.debug_vec_rat
+  io.debug_vconfig_rat := rat.io.debug_vconfig_rat
 
   // pipeline between decode and rename
   for (i <- 0 until RenameWidth) {
     // fusion decoder
-    val decodeHasException = io.frontend.cfVec(i).bits.exceptionVec(instrPageFault) || io.frontend.cfVec(i).bits.exceptionVec(instrAccessFault)
+    val decodeHasException = decode.io.out(i).bits.cf.exceptionVec(instrPageFault) || decode.io.out(i).bits.cf.exceptionVec(instrAccessFault)
     val disableFusion = decode.io.csrCtrl.singlestep || !decode.io.csrCtrl.fusion_enable
-    fusionDecoder.io.in(i).valid := io.frontend.cfVec(i).valid && !(decodeHasException || disableFusion)
-    fusionDecoder.io.in(i).bits := io.frontend.cfVec(i).bits.instr
+    fusionDecoder.io.in(i).valid := decode.io.out(i).valid && !(decodeHasException || disableFusion)
+    fusionDecoder.io.in(i).bits := decode.io.out(i).bits.cf.instr
     if (i > 0) {
       fusionDecoder.io.inReady(i - 1) := decode.io.out(i).ready
     }
@@ -454,6 +482,7 @@ class CtrlBlockImp(outer: CtrlBlock)(implicit p: Parameters) extends LazyModuleI
     rename.io.in(i).bits := renamePipe.bits
     rename.io.intReadPorts(i) := rat.io.intReadPorts(i).map(_.data)
     rename.io.fpReadPorts(i) := rat.io.fpReadPorts(i).map(_.data)
+    rename.io.vecReadPorts(i) := rat.io.vecReadPorts(i).map(_.data)
     rename.io.waittable(i) := RegEnable(waittable.io.rdata(i), decode.io.out(i).fire)
 
     if (i < RenameWidth - 1) {
@@ -481,10 +510,11 @@ class CtrlBlockImp(outer: CtrlBlock)(implicit p: Parameters) extends LazyModuleI
   }
 
   rename.io.redirect := stage2Redirect
-  rename.io.robCommits <> rob.io.commits
+  rename.io.robCommits <> rob.io.rabCommits
   rename.io.ssit <> ssit.io.rdata
-  rename.io.debug_int_rat <> rat.io.debug_int_rat
-  rename.io.debug_fp_rat <> rat.io.debug_fp_rat
+  rename.io.debug_int_rat <> rat.io.debug_int_rat2
+  rename.io.debug_vconfig_rat <> rat.io.debug_vconfig_rat2
+  rename.io.debug_fp_rat <> rat.io.debug_fp_rat2
 
   // pipeline between rename and dispatch
   for (i <- 0 until RenameWidth) {
@@ -571,6 +601,7 @@ class CtrlBlockImp(outer: CtrlBlock)(implicit p: Parameters) extends LazyModuleI
   io.robio.toCSR.perfinfo.retiredInstr <> RegNext(rob.io.csr.perfinfo.retiredInstr)
   io.robio.exception := rob.io.exception
   io.robio.exception.bits.uop.cf.pc := flushPC
+  io.robio.toCSR.vcsrFlag := rob.io.csr.vcsrFlag
 
   // rob to mem block
   io.robio.lsq <> rob.io.lsq

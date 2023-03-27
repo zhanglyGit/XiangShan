@@ -27,16 +27,17 @@ import xiangshan._
 import xiangshan.ExceptionNO._
 import xiangshan.backend.HasExuWbHelper
 
-class ExuWbArbiter(n: Int, hasFastUopOut: Boolean, fastVec: Seq[Boolean])(implicit p: Parameters) extends XSModule {
+class ExuWbArbiter(n: Int, hasFastUopOut: Boolean, fastVec: Seq[Boolean], isVpu: Boolean)(implicit p: Parameters) extends XSModule {
   val io = IO(new Bundle() {
     val redirect = Flipped(ValidIO(new Redirect))
-    val in = Vec(n, Flipped(DecoupledIO(new ExuOutput)))
-    val out = DecoupledIO(new ExuOutput)
+    val in = Vec(n, Flipped(DecoupledIO(new ExuOutput(isVpu))))
+    val out = DecoupledIO(new ExuOutput(isVpu))
   })
 
   class ExuCtrl extends Bundle{
     val uop = new MicroOp
     val fflags = UInt(5.W)
+    val vxsat = UInt(1.W)
     val redirectValid = Bool()
     val redirect = new Redirect
     val debug = new DebugBundle
@@ -82,6 +83,7 @@ class ExuWbArbiter(n: Int, hasFastUopOut: Boolean, fastVec: Seq[Boolean])(implic
 
 class WbArbiter(cfgs: Seq[ExuConfig], numOut: Int, isFp: Boolean)(implicit p: Parameters) extends LazyModule {
   val priorities = cfgs.map(c => if(isFp) c.wbFpPriority else c.wbIntPriority)
+  val isVpu = isFp
 
   // NOTE:
   // 0 for direct connect (exclusive);
@@ -146,15 +148,15 @@ class WbArbiter(cfgs: Seq[ExuConfig], numOut: Int, isFp: Boolean)(implicit p: Pa
   }
   println(sb)
 
-  lazy val module = new WbArbiterImp(this)
+  lazy val module = new WbArbiterImp(this, isVpu)
 }
 
-class WbArbiterImp(outer: WbArbiter)(implicit p: Parameters) extends LazyModuleImp(outer) {
+class WbArbiterImp(outer: WbArbiter, isVpu: Boolean)(implicit p: Parameters) extends LazyModuleImp(outer) {
 
   val io = IO(new Bundle() {
     val redirect = Flipped(ValidIO(new Redirect))
-    val in = Vec(outer.numInPorts, Flipped(DecoupledIO(new ExuOutput)))
-    val out = Vec(outer.numOutPorts, ValidIO(new ExuOutput))
+    val in = Vec(outer.numInPorts, Flipped(DecoupledIO(new ExuOutput(isVpu))))
+    val out = Vec(outer.numOutPorts, ValidIO(new ExuOutput(isVpu)))
   })
 
   val redirect = RegNextWithEnable(io.redirect)
@@ -210,7 +212,7 @@ class WbArbiterImp(outer: WbArbiter)(implicit p: Parameters) extends LazyModuleI
     }
     val hasFastUopOut = outer.hasFastUopOut(portIndex)
     val fastVec = outer.hasFastUopOutVec(portIndex)
-    val arb = Module(new ExuWbArbiter(shared.size, hasFastUopOut, fastVec))
+    val arb = Module(new ExuWbArbiter(shared.size, hasFastUopOut, fastVec, isVpu))
     arb.io.redirect <> redirect
     arb.io.in <> shared
     out.valid := arb.io.out.valid
@@ -239,7 +241,7 @@ class WbArbiterWrapper(
   val numIntWbPorts = intWbPorts.length
   val intConnections = intArbiter.allConnections
 
-  val fpConfigs = exuConfigs.filter(_.writeFpRf)
+  val fpConfigs = exuConfigs.filter(_.writeFpVecRf)
   val fpArbiter = LazyModule(new WbArbiter(fpConfigs, numFpOut, isFp = true))
   val fpWbPorts = fpArbiter.allConnections.map(c => c.map(fpConfigs(_)))
   val numFpWbPorts = fpWbPorts.length
@@ -255,7 +257,7 @@ class WbArbiterWrapper(
     require(duplicateSource.length == duplicatePorts.length)
     require(duplicateSink.length == duplicatePorts.length)
     val effectiveConfigs = intWbPorts ++ fpWbPorts.filterNot(cfg => duplicatePorts.contains(cfg))
-    val simpleConfigs = exuConfigs.filter(cfg => !cfg.writeFpRf && !cfg.writeIntRf).map(p => Seq(p))
+    val simpleConfigs = exuConfigs.filter(cfg => !cfg.writeFpVecRf && !cfg.writeIntRf).map(p => Seq(p))
     Seq(new WritebackSourceParams(effectiveConfigs ++ simpleConfigs))
   }
   override lazy val writebackSourceImp: HasWritebackSourceImp = module
@@ -266,8 +268,8 @@ class WbArbiterWrapper(
     val io = IO(new Bundle() {
       val hartId = Input(UInt(8.W))
       val redirect = Flipped(ValidIO(new Redirect))
-      val in = Vec(numInPorts, Flipped(DecoupledIO(new ExuOutput)))
-      val out = Vec(numOutPorts, ValidIO(new ExuOutput))
+      val in  = Vec(numInPorts, Flipped(DecoupledIO(new ExuOutput(true))))
+      val out = Vec(numOutPorts, ValidIO(new ExuOutput(true)))
     })
 
     override def writebackSource: Option[Seq[Seq[Valid[ExuOutput]]]] = {
@@ -280,7 +282,7 @@ class WbArbiterWrapper(
       // effectivePorts: distinct write-back ports that write to the regfile
       val effectivePorts = io.out.zipWithIndex.filterNot(i => duplicatePorts.map(_._2).contains(i._2 - numIntWbPorts))
       // simplePorts: write-back ports that don't write to the regfile but update the ROB states
-      val simplePorts = exuConfigs.zip(io.in).filter(cfg => !cfg._1.writeFpRf && !cfg._1.writeIntRf)
+      val simplePorts = exuConfigs.zip(io.in).filter(cfg => !cfg._1.writeFpVecRf && !cfg._1.writeIntRf)
       val simpleWriteback = simplePorts.map(_._2).map(decoupledIOToValidIO)
       val writeback = WireInit(VecInit(effectivePorts.map(_._1) ++ simpleWriteback))
       for ((sink, source) <- duplicateSink.zip(duplicateSource)) {
@@ -295,8 +297,8 @@ class WbArbiterWrapper(
     intArbiter.module.io.redirect <> io.redirect
     val intWriteback = io.in.zip(exuConfigs).filter(_._2.writeIntRf)
     intArbiter.module.io.in.zip(intWriteback).foreach { case (arb, (wb, cfg)) =>
-      // When the function unit does not write fp regfile, we don't need to check fpWen
-      arb.valid := wb.valid && (!cfg.writeFpRf.B || !wb.bits.uop.ctrl.fpWen)
+      // When the function unit does not write fp regfile, we don't need to check fpVecWen
+      arb.valid := wb.valid && (!cfg.writeFpVecRf.B || !wb.bits.uop.ctrl.fpVecWen)
       arb.bits := wb.bits
       when (arb.valid) {
         wb.ready := arb.ready
@@ -314,10 +316,10 @@ class WbArbiterWrapper(
     }
 
     fpArbiter.module.io.redirect <> io.redirect
-    val fpWriteback = io.in.zip(exuConfigs).filter(_._2.writeFpRf)
+    val fpWriteback = io.in.zip(exuConfigs).filter(_._2.writeFpVecRf)
     fpArbiter.module.io.in.zip(fpWriteback).foreach{ case (arb, (wb, cfg)) =>
-      // When the function unit does not write fp regfile, we don't need to check fpWen
-      arb.valid := wb.valid && (!cfg.writeIntRf.B || wb.bits.uop.ctrl.fpWen)
+      // When the function unit does not write fp regfile, we don't need to check fpVecWen
+      arb.valid := wb.valid && (!cfg.writeIntRf.B || wb.bits.uop.ctrl.fpVecWen)
       arb.bits := wb.bits
       when (arb.valid) {
         wb.ready := arb.ready

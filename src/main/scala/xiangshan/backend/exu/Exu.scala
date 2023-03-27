@@ -21,9 +21,9 @@ import chisel3._
 import chisel3.experimental.hierarchy.{IsLookupable, instantiable, public}
 import chisel3.util._
 import utils.XSPerfAccumulate
+import utility.ZeroExt
 import xiangshan._
 import xiangshan.backend.fu._
-import xiangshan.backend.fu.fpu.FMAMidResultIO
 
 case class ExuParameters
 (
@@ -62,12 +62,19 @@ case class ExuConfig
   def max(in: Seq[Int]): Int = in.reduce((x, y) => if (x > y) x else y)
 
   val intSrcCnt = max(fuConfigs.map(_.numIntSrc))
-  val fpSrcCnt = max(fuConfigs.map(_.numFpSrc))
+  private val fpSrcCnt = max(fuConfigs.map(_.numFpSrc))
+  private val vecSrcCnt = max(fuConfigs.map(_.numVecSrc))
+  val fpVecSrcCnt = max(fuConfigs.map(x => x.numFpSrc + x.numVecSrc))
   val readIntRf = intSrcCnt > 0
   val readFpRf = fpSrcCnt > 0
+  val readVecRf = vecSrcCnt > 0
+  val readFpVecRf = readFpRf || readVecRf
   val writeIntRf = fuConfigs.map(_.writeIntRf).reduce(_ || _)
   val writeFpRf = fuConfigs.map(_.writeFpRf).reduce(_ || _)
+  val writeVecRf = fuConfigs.map(_.writeVecRf).reduce(_ || _)
+  val writeFpVecRf = writeFpRf || writeVecRf
   val writeFflags = fuConfigs.map(_.writeFflags).reduce(_ || _)
+  val writeVxsat = fuConfigs.map(_.writeVxsat).reduce(_ || _)
   val hasRedirect = fuConfigs.map(_.hasRedirect).reduce(_ || _)
   val hasFastUopOut = fuConfigs.map(_.fastUopOut).reduce(_ || _)
   val exceptionOut = fuConfigs.map(_.exceptionOut).reduce(_ ++ _).distinct.sorted
@@ -76,6 +83,8 @@ case class ExuConfig
   val replayInst: Boolean = fuConfigs.map(_.replayInst).reduce(_ || _)
   val trigger: Boolean = fuConfigs.map(_.trigger).reduce(_ || _)
   val needExceptionGen: Boolean = exceptionOut.nonEmpty || flushPipe || replayInst || trigger
+
+  val isVPU = readVecRf && writeVecRf
 
   val latency: HasFuLatency = {
     val lats = fuConfigs.map(_.latency)
@@ -97,15 +106,24 @@ case class ExuConfig
   val wakeupFromRS = hasCertainLatency && (wbIntPriority <= 1 || wbFpPriority <= 1)
   val allWakeupFromRS = !hasUncertainlatency && (wbIntPriority <= 1 || wbFpPriority <= 1)
   val wakeupFromExu = !wakeupFromRS
-  val hasExclusiveWbPort = (wbIntPriority == 0 && writeIntRf) || (wbFpPriority == 0 && writeFpRf)
+  val hasExclusiveWbPort = (wbIntPriority == 0 && writeIntRf) || (wbFpPriority == 0 && writeFpVecRf)
   val needLoadBalance = hasUncertainlatency
 
+  // NOTE: cross domain read or write
   def needWbPipeline(isFp: Boolean): Boolean = {
-    (isFp && readIntRf && writeFpRf) || (!isFp && readFpRf && writeIntRf)
+    (isFp && readIntRf && writeFpVecRf) || (!isFp && readFpVecRf && writeIntRf)
   }
 
   def canAccept(fuType: UInt): Bool = {
     Cat(fuConfigs.map(_.fuType === fuType)).orR
+  }
+
+  override def toString: String = {
+    val fuList = fuConfigs.map(_.toString).map("    " + _).foldLeft("")(_ + "\n" + _).trim()
+    s"${name}: blockName ${blockName} " + "" +
+    s"wbPriority(int|fp) ${wbIntPriority}|${wbFpPriority} " +
+    s"extExu ${extendsExu} FU List:\n" +
+    s"    ${fuList}"
   }
 }
 
@@ -113,17 +131,23 @@ case class ExuConfig
 abstract class Exu(cfg: ExuConfig)(implicit p: Parameters) extends XSModule {
   @public val config = cfg
 
+  val dataWidth = if (config.isVPU) VLEN else XLEN
+
   @public val io = IO(new Bundle() {
-    val fromInt = if (config.readIntRf) Flipped(DecoupledIO(new ExuInput)) else null
-    val fromFp = if (config.readFpRf) Flipped(DecoupledIO(new ExuInput)) else null
+    val fromInt = if (config.readIntRf) Flipped(DecoupledIO(new ExuInput(false))) else null
+    val fromFp = if (config.readFpVecRf) Flipped(DecoupledIO(new ExuInput(true))) else null
     val redirect = Flipped(ValidIO(new Redirect))
-    val out = DecoupledIO(new ExuOutput)
+    val out = DecoupledIO(new ExuOutput(config.isVPU))
+
+    // NOTE: a ExeUnit can only accept Int or Fp, not both
+    def fuIn = if (config.readIntRf) fromInt else fromFp
   })
 
   @public val csrio = if (config == JumpCSRExeUnitCfg) Some(IO(new CSRFileIO)) else None
   @public val fenceio = if (config == JumpCSRExeUnitCfg) Some(IO(new FenceIO)) else None
   @public val frm = if (config == FmacExeUnitCfg || config == FmiscExeUnitCfg) Some(IO(Input(UInt(3.W)))) else None
-  @public val fmaMid = if (config == FmacExeUnitCfg) Some(IO(new FMAMidResultIO)) else None
+  @public val vxrm = if (config == FmacExeUnitCfg) Some(IO(Input(UInt(2.W)))) else None // TODO: only VIPU need vxrm
+  @public val vstart = if (config == FmacExeUnitCfg) Some(IO(Input(UInt(XLEN.W)))) else None // TODO: only VPU need vstart
 
   val functionUnits = config.fuConfigs.map(cfg => {
     val mod = Module(cfg.fuGen(p))
@@ -131,15 +155,24 @@ abstract class Exu(cfg: ExuConfig)(implicit p: Parameters) extends XSModule {
     mod
   })
 
-  val fuIn = config.fuConfigs.map(fuCfg =>
-    if (fuCfg.numIntSrc > 0) {
-      assert(fuCfg.numFpSrc == 0 || config == StdExeUnitCfg)
-      io.fromInt
-    } else {
-      assert(fuCfg.numFpSrc > 0)
-      io.fromFp
-    }
-  )
+  val fuIn = config.fuConfigs.map(a => io.fuIn)
+  // val fuIn = config.fuConfigs.map(fuCfg =>
+  //   if (fuCfg.numIntSrc > 0) {
+  //     // read rf from int-rf
+  //     assert(fuCfg.numFpSrc == 0 || config == StdExeUnitCfg)
+  //     io.fromInt
+  //   } else {
+  //     // read rf from fp/vec-rf
+  //     assert(fuCfg.numFpSrc > 0 || fuCfg.numVecSrc > 0)
+  //     io.fromFp
+  //   }
+  // )
+  for (fu <- config.fuConfigs) {
+    println(s"FU-${fu.name} srcNum int ${fu.numIntSrc} fp ${fu.numFpSrc} vec ${fu.numVecSrc}")
+  }
+  // println("EXU require: " + config.fuConfigs.filter(a => a.numIntSrc > 0 && (a.numFpSrc > 0 || a.numVecSrc > 0)).map(_.name).reduce(_ + " " + _))
+  // require(config.fuConfigs.filter(a => (a.numIntSrc > 0) && ((a.numFpSrc > 0) || (a.numVecSrc > 0))).isEmpty)
+  // require(config.fuConfigs.filter(_.numIntSrc >0).isEmpty || config.fuConfigs.filter(a => a.numFpSrc > 0 || a.numVecSrc > 0).isEmpty)
   val fuSel = fuIn.zip(config.fuConfigs).map { case (in, cfg) => cfg.fuSel(in.bits.uop) }
 
   val fuInReady = config.fuConfigs.zip(fuIn).zip(functionUnits.zip(fuSel)).map { case ((fuCfg, in), (fu, sel)) =>
@@ -171,7 +204,7 @@ abstract class Exu(cfg: ExuConfig)(implicit p: Parameters) extends XSModule {
         out.bits.uop := in.head.bits.uop
         out.valid := in.head.valid
       } else {
-        val arb = Module(new Arbiter(new ExuOutput, in.size))
+        val arb = Module(new Arbiter(new ExuOutput(config.isVPU), in.size))
         in.zip(arb.io.in).foreach{ case (l, r) =>
           l.ready := r.ready
           r.valid := l.valid
@@ -213,7 +246,7 @@ abstract class Exu(cfg: ExuConfig)(implicit p: Parameters) extends XSModule {
 
   val readFpFu = config.fuConfigs
     .zip(fuInReady.zip(fuSel))
-    .filter(_._1.numFpSrc > 0)
+    .filter(x => (x._1.numFpSrc > 0 || x._1.numVecSrc > 0))
     .map(_._2)
 
   def inReady(s: Seq[(Bool, Bool)]): Bool = {
@@ -234,7 +267,7 @@ abstract class Exu(cfg: ExuConfig)(implicit p: Parameters) extends XSModule {
     io.fromInt.ready := !io.fromInt.valid || inReady(readIntFu)
   }
 
-  if (config.readFpRf) {
+  if (config.readFpVecRf) {
     XSPerfAccumulate("from_fp_fire", io.fromFp.fire())
     XSPerfAccumulate("from_fp_valid", io.fromFp.valid)
     io.fromFp.ready := !io.fromFp.valid || inReady(readFpFu)
@@ -242,6 +275,7 @@ abstract class Exu(cfg: ExuConfig)(implicit p: Parameters) extends XSModule {
 
   def assignDontCares(out: ExuOutput) = {
     out.fflags := DontCare
+    out.vxsat := DontCare
     out.debug <> DontCare
     out.debug.isMMIO := false.B
     out.debug.isPerfCnt := false.B

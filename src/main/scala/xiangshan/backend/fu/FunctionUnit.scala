@@ -44,9 +44,12 @@ case class FuConfig
   fuType: UInt,
   numIntSrc: Int,
   numFpSrc: Int,
+  numVecSrc: Int = 0,
   writeIntRf: Boolean,
   writeFpRf: Boolean,
+  writeVecRf: Boolean = false,
   writeFflags: Boolean = false,
+  writeVxsat: Boolean = false,
   hasRedirect: Boolean = false,
   latency: HasFuLatency = CertainLatency(0),
   fastUopOut: Boolean = false,
@@ -58,7 +61,25 @@ case class FuConfig
   replayInst: Boolean = false,
   trigger: Boolean = false
 ) {
-  def srcCnt: Int = math.max(numIntSrc, numFpSrc)
+  def srcCnt: Int = math.max(math.max(numIntSrc, numFpSrc), numVecSrc)
+  def isVectorFU: Boolean = (numVecSrc > 0) && writeVecRf
+
+  // require(numFpSrc == 0 || numVecSrc == 0, "numVecSrc+numFpSrc is not handled now. It's forbidden until someone add support for numVecSrc+numFpSrc")
+
+  override def toString: String = {
+    s"${name}: SrcNum(${numIntSrc}|${numFpSrc}|${numVecSrc}) " +
+    s"Write(" +
+    (if(writeIntRf) "int|" else "") +
+    (if(writeFpRf) "fp|" else "") +
+    (if(writeVecRf) "vec|" else "") +
+    (if(writeFflags) "fflags" else "") +
+    (if(writeVxsat) "vxsat" else "") +
+    (if(!writeIntRf && !writeFpRf && !writeVecRf && !writeFflags && !writeVxsat) "none" else "") + ") " +
+    (if(hasRedirect) "hasRedirect " else "") +
+    (if(latency.latencyVal.getOrElse(99) != 99) "latency " + latency.latencyVal.get+" " else "") +
+    (if(fastUopOut) "hasFastUopOut " else "") +
+    s"inputBuffer (${hasInputBuffer._1},${hasInputBuffer._2},${hasInputBuffer._3}) "
+  }
 }
 
 
@@ -68,7 +89,7 @@ class FuOutput(val len: Int)(implicit p: Parameters) extends XSBundle {
 }
 
 class FunctionUnitInput(val len: Int)(implicit p: Parameters) extends XSBundle {
-  val src = Vec(3, UInt(len.W))
+  val src = Vec(4, UInt(len.W))
   val uop = new MicroOp
 }
 

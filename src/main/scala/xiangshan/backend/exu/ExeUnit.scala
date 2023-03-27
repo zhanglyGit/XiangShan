@@ -26,6 +26,7 @@ import utility._
 import xiangshan._
 import xiangshan.backend.fu.fpu.{FMA, FPUSubModule}
 import xiangshan.backend.fu.{CSR, FUWithRedirect, Fence, FenceToSbuffer}
+import xiangshan.backend.fu.vector.{VFPU, VPPU, VPUSubModule}
 
 class FenceIO(implicit p: Parameters) extends XSBundle {
   val sfence = Output(new SfenceBundle)
@@ -38,9 +39,11 @@ class ExeUnit(config: ExuConfig)(implicit p: Parameters) extends Exu(config) {
 
   val disableSfence = WireInit(false.B)
   val csr_frm = WireInit(frm.getOrElse(0.U(3.W)))
+  val csr_vxrm = WireInit(vxrm.getOrElse(0.U(2.W)))
+  val csr_vstart = WireInit(vstart.getOrElse(0.U(XLEN.W)))
 
   val hasRedirect = config.fuConfigs.zip(functionUnits).filter(_._1.hasRedirect).map(_._2)
-  println(s"${functionUnits} ${hasRedirect} hasRedirect: ${hasRedirect.length}")
+  println(s"ExeUnit: ${functionUnits.map(_.name).reduce(_ + " " + _)} ${hasRedirect} hasRedirect: ${hasRedirect.length}")
   if (hasRedirect.nonEmpty) {
     require(hasRedirect.length <= 1)
     io.out.bits.redirectValid := hasRedirect.head.asInstanceOf[FUWithRedirect].redirectOutValid
@@ -57,7 +60,6 @@ class ExeUnit(config: ExuConfig)(implicit p: Parameters) extends Exu(config) {
     csrio.get.trapTarget := RegNext(csr.csrio.trapTarget)
     csr.csrio.exception := DelayN(csrio.get.exception, 2)
     disableSfence := csr.csrio.disableSfence
-    csr_frm := csr.csrio.fpu.frm
     // setup skip for hpm CSR read
     io.out.bits.debug.isPerfCnt := RegNext(csr.csrio.isPerfCnt) // TODO: this is dirty
   }
@@ -74,6 +76,8 @@ class ExeUnit(config: ExuConfig)(implicit p: Parameters) extends Exu(config) {
   }
 
   val fpModules = functionUnits.zip(config.fuConfigs.zipWithIndex).filter(_._1.isInstanceOf[FPUSubModule])
+  val vfpModules = functionUnits.zip(config.fuConfigs.zipWithIndex).filter(_._1.isInstanceOf[VFPU])
+  val vipuModules = functionUnits.zip(config.fuConfigs.zipWithIndex).filter(x => x._1.isInstanceOf[VPUSubModule])
   if (fpModules.nonEmpty) {
     // frm is from csr/frm (from CSR) or instr_rm (from instruction decoding)
     val fpSubModules = fpModules.map(_._1.asInstanceOf[FPUSubModule])
@@ -91,11 +95,23 @@ class ExeUnit(config: ExuConfig)(implicit p: Parameters) extends Exu(config) {
     }
     io.out.bits.fflags := Mux1H(fflagsSel.map(_._1), fflagsSel.map(_._2))
   }
-
+  // Overwrite write operation of fpModules
+  if (vfpModules.nonEmpty) {
+    val vfpSubModules = vfpModules.map(_._1.asInstanceOf[VFPU])
+    vfpSubModules.foreach(mod => {
+      mod.rm := csr_frm
+    })
+  }
+  if (vipuModules.nonEmpty) {
+    vipuModules.map(_._1.asInstanceOf[VPUSubModule]).foreach(mod => {
+      mod.vxrm := csr_vxrm
+      mod.vstart := csr_vstart
+      io.out.bits.vxsat := mod.vxsat
+    })
+  }
   val fmaModules = functionUnits.filter(_.isInstanceOf[FMA]).map(_.asInstanceOf[FMA])
   if (fmaModules.nonEmpty) {
     require(fmaModules.length == 1)
-    fmaModules.head.midResult <> fmaMid.get
   }
 
   if (config.readIntRf) {
@@ -126,7 +142,6 @@ object ExeUnitDef {
       case JumpCSRExeUnitCfg => Definition(new JumpCSRExeUnit)
       case FmacExeUnitCfg => Definition(new FmacExeUnit)
       case FmiscExeUnitCfg => Definition(new FmiscExeUnit)
-      case StdExeUnitCfg => Definition(new StdExeUnit)
       case _ => {
         println(s"cannot generate exeUnit from $cfg")
         null

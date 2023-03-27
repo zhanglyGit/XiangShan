@@ -45,14 +45,14 @@ abstract class FPUDataModule(implicit p: Parameters) extends XSModule {
   val fflags = io.out.fflags
 }
 
-abstract class FPUSubModule(implicit p: Parameters) extends FunctionUnit
+abstract class FPUSubModule(len: Int = 64)(implicit p: Parameters) extends FunctionUnit(len: Int)
   with HasUIntToSIntHelper
 {
   val rm = IO(Input(UInt(3.W)))
   val fflags = IO(Output(UInt(5.W)))
   val dataModule: FPUDataModule
   def connectDataModule = {
-    dataModule.io.in.src <> io.in.bits.src
+    dataModule.io.in.src <> io.in.bits.src.take(dataModule.io.in.src.length)
     dataModule.io.in.fpCtrl <> io.in.bits.uop.ctrl.fpu
     dataModule.io.in.rm <> rm
     io.out.bits.data := dataModule.io.out.data
