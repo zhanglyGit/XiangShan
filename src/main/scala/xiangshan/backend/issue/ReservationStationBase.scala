@@ -107,7 +107,7 @@ class BaseReservationStationWrapper(modGen: RSMod)(implicit p: Parameters) exten
     }
     if (cfg == StaExeUnitCfg || cfg == LdExeUnitCfg) {
       params.lsqFeedback = true
-      params.checkWaitBit = true
+      params.checkWaitBit = false
     }
     if(cfg == StaExeUnitCfg) {
       params.hasFeedback = true
