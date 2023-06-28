@@ -177,6 +177,9 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
   val atomicsUnit = Module(new AtomicsUnit)
   val vectorLoadWrapperModule = Module(new VectorLoadWrapper)
   val vsflowqueue = Module(new VsFlowQueue)
+  vsflowqueue.io.issuePtrExt := DontCare
+  vsflowqueue.io.flowPtrExt := DontCare
+
   val vsuopqueue = Module(new VsUopQueue)
   val vsExcSignal = Module(new VsExcSignal)
   val vlExcSignal = Module(new VlExcSignal)

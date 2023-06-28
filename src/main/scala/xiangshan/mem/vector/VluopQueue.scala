@@ -72,12 +72,16 @@ object VecGenData {
 /**
  * */
 class VluopBundle(implicit p: Parameters) extends XSBundle {
-  val uop       = new MicroOp
-  val dataVMask = Vec(VLEN/8,Bool())
-  val data      = Vec(VLEN/8,UInt(8.W))
+  val uop            = new MicroOp
+  val dataVMask      = Vec(VLEN/8,Bool())
+  val data           = Vec(VLEN/8,UInt(8.W))
+  val fof            = Bool()
+  val excp_eew_index = UInt(8.W)
+  val exceptionVec   = ExceptionVec()
 
-  def apply (uop: MicroOp) = {
+  def apply (uop: MicroOp, fof: Bool) = {
     this.uop  := uop
+    this.fof  := fof
     this
   }
 }
@@ -86,6 +90,8 @@ class VluopQueueIOBundle(implicit p: Parameters) extends XSBundle {
   val loadRegIn   = Vec(VecLoadPipelineWidth, Flipped(DecoupledIO(new ExuInput(isVpu = true))))
   val Redirect    = Flipped(ValidIO(new Redirect))
   val instType    = Vec(VecLoadPipelineWidth, Input(UInt(3.W)))
+  val fof         = Vec(VecLoadPipelineWidth, Input(Bool()))
+  val whole_reg   = Vec(VecLoadPipelineWidth, Input(Bool()))
   val emul        = Vec(VecLoadPipelineWidth, Input(UInt(3.W)))
   val realFlowNum = Vec(VecLoadPipelineWidth, Input(UInt(5.W)))
   val loadPipeIn  = Vec(VecLoadPipelineWidth, Flipped(DecoupledIO(new VecExuOutput)))
@@ -123,15 +129,19 @@ class VluopQueue(implicit p: Parameters) extends XSModule with HasCircularQueueP
   val free           = WireInit(VecInit(Seq.fill(VecStorePipelineWidth)(0.U(VlUopSize.W))))
 
   //First-level buffer
-  val buffer_valid_s0  = RegInit(VecInit(Seq.fill(VecLoadPipelineWidth)(false.B)))
-  val data_buffer_s0   = RegInit(VecInit(Seq.fill(VecLoadPipelineWidth)(0.U(VLEN.W))))
-  val mask_buffer_s0   = RegInit(VecInit(Seq.fill(VecLoadPipelineWidth)(VecInit(Seq.fill(2)(0.U((VLEN/8).W))))))
-  val rob_idx_valid_s0 = RegInit(VecInit(Seq.fill(VecLoadPipelineWidth)(VecInit(Seq.fill(2)(false.B)))))
-  val inner_idx_s0     = RegInit(VecInit(Seq.fill(VecLoadPipelineWidth)(VecInit(Seq.fill(2)(0.U(3.W))))))
-  val rob_idx_s0       = RegInit(VecInit(Seq.fill(VecLoadPipelineWidth)(VecInit(Seq.fill(2)(0.U.asTypeOf(new RobPtr))))))
-  val reg_offset_s0    = RegInit(VecInit(Seq.fill(VecLoadPipelineWidth)(VecInit(Seq.fill(2)(0.U(4.W))))))
-  val offset_s0        = RegInit(VecInit(Seq.fill(VecLoadPipelineWidth)(VecInit(Seq.fill(2)(0.U(4.W))))))
-  val uop_s0           = RegInit(VecInit(Seq.fill(VecLoadPipelineWidth)(0.U.asTypeOf(new MicroOp))))
+  val buffer_valid_s0    = RegInit(VecInit(Seq.fill(VecLoadPipelineWidth)(false.B)))
+  val data_buffer_s0     = RegInit(VecInit(Seq.fill(VecLoadPipelineWidth)(0.U(VLEN.W))))
+  val mask_buffer_s0     = RegInit(VecInit(Seq.fill(VecLoadPipelineWidth)(VecInit(Seq.fill(2)(0.U((VLEN/8).W))))))
+  val rob_idx_valid_s0   = RegInit(VecInit(Seq.fill(VecLoadPipelineWidth)(VecInit(Seq.fill(2)(false.B)))))
+  val inner_idx_s0       = RegInit(VecInit(Seq.fill(VecLoadPipelineWidth)(VecInit(Seq.fill(2)(0.U(3.W))))))
+  val rob_idx_s0         = RegInit(VecInit(Seq.fill(VecLoadPipelineWidth)(VecInit(Seq.fill(2)(0.U.asTypeOf(new RobPtr))))))
+  val reg_offset_s0      = RegInit(VecInit(Seq.fill(VecLoadPipelineWidth)(VecInit(Seq.fill(2)(0.U(4.W))))))
+  val offset_s0          = RegInit(VecInit(Seq.fill(VecLoadPipelineWidth)(VecInit(Seq.fill(2)(0.U(4.W))))))
+  val uop_s0             = RegInit(VecInit(Seq.fill(VecLoadPipelineWidth)(0.U.asTypeOf(new MicroOp))))
+  val excp_s0            = RegInit(VecInit(Seq.fill(VecLoadPipelineWidth)(false.B)))
+  val is_first_ele_s0    = RegInit(VecInit(Seq.fill(VecLoadPipelineWidth)(false.B)))
+  val excep_ele_index_s0 = RegInit(VecInit(Seq.fill(VecLoadPipelineWidth)(0.U(8.W))))
+  val exceptionVec_s0    = RegInit(VecInit(Seq.fill(VecLoadPipelineWidth)(0.U.asTypeOf(ExceptionVec()))))
   //Second-level buffer
   //val buffer_valid_s1  = RegInit(VecInit(Seq.fill(VecLoadPipelineWidth)(VecInit(Seq.fill(2)(false.B)))))
   //val data_buffer_s1   = RegInit(VecInit(Seq.fill(VecLoadPipelineWidth)(VecInit(Seq.fill(2)(0.U(VLEN.W))))))
@@ -166,7 +176,7 @@ class VluopQueue(implicit p: Parameters) extends XSModule with HasCircularQueueP
                                   pre_allocated(entry)
       val debug_hit = WireInit(VecInit(Seq.fill(VlUopSize)(false.B))) // for debug
       when (already_in_vec(i)(entry) && io.loadRegIn(i).valid) {
-        VluopEntry(entry).apply(uop = io.loadRegIn(i).bits.uop)
+        VluopEntry(entry).apply(uop = io.loadRegIn(i).bits.uop, fof = io.fof(i))
         allocated(entry) := true.B
         debug_hit(entry) := true.B
       }
@@ -212,7 +222,7 @@ class VluopQueue(implicit p: Parameters) extends XSModule with HasCircularQueueP
           val inUop = WireInit(io.loadRegIn(i).bits.uop)
           //val isPer = !(i.U === io.loadRegIn(0).bits.uop.ctrl.uopIdx || i.U === io.loadRegIn(1).bits.uop.ctrl.uopIdx)
           inUop.ctrl.uopIdx := Mux(instType(i) === "b000".U, j.U, io.loadRegIn(i).bits.uop.ctrl.uopIdx) //TODO: If flow don't write loadQueue, ldIdx needn't calculate
-          VluopEntry(enqPtr).apply(uop = inUop)
+          VluopEntry(enqPtr).apply(uop = inUop, fof = io.fof(i))
           valid(enqPtr) := true.B
           pre_allocated(enqPtr) := true.B
           counter(enqPtr) := realFlowNum(i)
@@ -227,14 +237,18 @@ class VluopQueue(implicit p: Parameters) extends XSModule with HasCircularQueueP
   // write data from loadpipe to first_level buffer
   for (i <- 0 until VecLoadPipelineWidth) {
     when (io.loadPipeIn(i).fire) {
-      buffer_valid_s0(i)  := true.B
-      data_buffer_s0(i)   := io.loadPipeIn(i).bits.vecdata
-      rob_idx_valid_s0(i) := io.loadPipeIn(i).bits.rob_idx_valid
-      rob_idx_s0(i)       := io.loadPipeIn(i).bits.rob_idx
-      inner_idx_s0(i)     := io.loadPipeIn(i).bits.inner_idx
-      reg_offset_s0(i)    := io.loadPipeIn(i).bits.reg_offset
-      offset_s0(i)        := io.loadPipeIn(i).bits.offset
-      uop_s0(i)           := io.loadPipeIn(i).bits.uop
+      buffer_valid_s0(i)    := true.B
+      data_buffer_s0(i)     := io.loadPipeIn(i).bits.vecdata
+      rob_idx_valid_s0(i)   := io.loadPipeIn(i).bits.rob_idx_valid
+      rob_idx_s0(i)         := io.loadPipeIn(i).bits.rob_idx
+      inner_idx_s0(i)       := io.loadPipeIn(i).bits.inner_idx
+      reg_offset_s0(i)      := io.loadPipeIn(i).bits.reg_offset
+      offset_s0(i)          := io.loadPipeIn(i).bits.offset
+      uop_s0(i)             := io.loadPipeIn(i).bits.uop
+      excp_s0(i)            := io.loadPipeIn(i).bits.excp
+      is_first_ele_s0(i)    := io.loadPipeIn(i).bits.is_first_ele
+      excep_ele_index_s0(i) := io.loadPipeIn(i).bits.excp_ele_index
+      exceptionVec_s0(i)     := io.loadPipeIn(i).bits.exceptionVec
       for (j <- 0 until 2) {
         mask_buffer_s0(i)(j) := io.loadPipeIn(i).bits.mask << io.loadPipeIn(i).bits.offset(j)
       }
@@ -258,7 +272,7 @@ class VluopQueue(implicit p: Parameters) extends XSModule with HasCircularQueueP
   ///    rob_idx_valid_s1(i) := VecInit(Seq.fill(2)(false.B))
   ///  }
   ///}
-
+0.U.asTypeOf(ExceptionVec())
   //write data from first_level buffer to VluopEntry
   for (i <- 0 until VecLoadPipelineWidth) {
     val mask_buffer = VecGenMask(rob_idx_valid = rob_idx_valid_s0(i),
@@ -270,15 +284,28 @@ class VluopQueue(implicit p: Parameters) extends XSModule with HasCircularQueueP
                                  offset = offset_s0(i),
                                  data = data_buffer_s0(i))
     for (j <- 0 until 2) {
-      when (buffer_valid_s0(i) && rob_idx_valid_s0(i)(j)) {
+      when(buffer_valid_s0(i) && rob_idx_valid_s0(i)(j)) {
         for (entry <- 0 until VlUopSize) {
-          when (rob_idx_s0(i)(j).value === VluopEntry(entry).uop.robIdx.value &&
-                inner_idx_s0(i)(j) === VluopEntry(entry).uop.ctrl.uopIdx) {
+          when(rob_idx_s0(i)(j).value === VluopEntry(entry).uop.robIdx.value &&
+            inner_idx_s0(i)(j) === VluopEntry(entry).uop.ctrl.uopIdx) {
             counter(entry) := counter(entry) - 1.U
             for (k <- 0 until VLEN / 8) {
-              when (mask_buffer(j)(k)) {
+              when(mask_buffer(j)(k)) {
                 VluopEntry(entry).data(k) := data_buffer(j)(k * 8 + 7, k * 8)
                 VluopEntry(entry).dataVMask(k) := mask_buffer(j)(k)
+              }
+            }
+            when(excp_s0(i)) {
+              when(VluopEntry(entry).fof) {
+                when(VluopEntry(entry).uop.robIdx.value === 0.U & is_first_ele_s0(i)) {
+                  VluopEntry(entry).excp_eew_index := excep_ele_index_s0(i)
+                  VluopEntry(entry).exceptionVec := exceptionVec_s0(i)
+                }
+              }.otherwise {
+                when(VluopEntry(entry).excp_eew_index < excep_ele_index_s0(i)) {
+                  VluopEntry(entry).excp_eew_index := excep_ele_index_s0(i)
+                  VluopEntry(entry).exceptionVec := exceptionVec_s0(i)
+                }
               }
             }
           }

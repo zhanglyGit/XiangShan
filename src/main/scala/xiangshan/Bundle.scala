@@ -158,7 +158,8 @@ class VType(implicit p: Parameters) extends XSBundle {
 }
 
 class VConfig(implicit p: Parameters) extends XSBundle {
-  val vl    = UInt(8.W)
+  val vl     = UInt(8.W)
+  val vstart = UInt(8.W)
   val vtype = new VType
 }
 

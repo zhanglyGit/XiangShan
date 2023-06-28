@@ -73,6 +73,10 @@ class VecExuOutput(implicit p: Parameters) extends ExuOutput {
   val rob_idx = Vec(2,new RobPtr)
   val offset = Vec(2,UInt(4.W))
   val reg_offset = Vec(2,UInt(4.W))
+  val excp = Bool()
+  val is_first_ele = Bool()
+  val excp_ele_index = UInt(8.W)
+  val exceptionVec = ExceptionVec()
 }
 
 class Uop2Flow(implicit p: Parameters) extends ExuInput(isVpu = true){
@@ -82,7 +86,8 @@ class Uop2Flow(implicit p: Parameters) extends ExuInput(isVpu = true){
   val emul     = UInt(3.W)
   val instType = UInt(3.W)
   val uop_unit_stride_fof = Bool()
-  val alignedType = UInt(2.W)
+  val uop_unit_whole_reg = Bool()
+  val agnedType = UInt(2.W)
   val uop_segment_num = UInt(3.W)
 }
 
@@ -112,6 +117,16 @@ object MulDataSize {
       "b001".U -> 16.U , // 2
       "b010".U -> 16.U , // 4
       "b011".U -> 16.U   // 8
+    )))}
+}
+
+object OneRegNum {
+  def apply (eew: UInt): UInt = { //mul means emul or lmul
+    (LookupTree(eew,List(
+      "b000".U -> 16.U , // 1
+      "b101".U -> 8.U , // 2
+      "b110".U -> 4.U , // 4
+      "b111".U -> 2.U   // 8
     )))}
 }
 

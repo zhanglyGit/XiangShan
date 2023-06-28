@@ -106,6 +106,22 @@ object VLRegOffset {
     )))}
 }
 
+object VLExpCtrl {
+  def apply (vstart: UInt, vl: UInt, eleIdx: UInt):Bool = {
+    val exp = Wire(Bool())
+    when (vstart >= vl || vl === 0.U) {
+      exp := false.B
+    }.otherwise {
+      when (eleIdx >= vstart && eleIdx < vl) {
+        exp := true.B
+      }.otherwise {
+        exp := false.B
+      }
+    }
+    exp
+  }
+}
+
 class VecLoadPipelineBundle(implicit p: Parameters) extends XSBundleWithMicroOp{
   val vaddr               = UInt(VAddrBits.W)
   val mask                = UInt((VLEN/8).W)
@@ -116,6 +132,9 @@ class VecLoadPipelineBundle(implicit p: Parameters) extends XSBundleWithMicroOp{
   val reg_offset          = Vec(2,UInt(4.W))
   val offset              = Vec(2,UInt(4.W))
   val alignedType         = UInt(2.W)
+  val exp                 = Bool()
+  val is_first_ele        = Bool()
+  val flow_idx            = UInt(8.W)
 }
 
 class VlflowQueueIOBundle(implicit p: Parameters) extends XSBundle {
@@ -127,6 +146,7 @@ class VlflowQueueIOBundle(implicit p: Parameters) extends XSBundle {
   val emul         = Vec(VecLoadPipelineWidth, Input(UInt(3.W)))
   val instType     = Vec(VecLoadPipelineWidth, Input(UInt(3.W)))
   val uop_unit_stride_fof = Vec(VecLoadPipelineWidth, Input(Bool()))
+  val whole_reg   = Vec(VecLoadPipelineWidth, Input(Bool()))
   val uop_segment_num = Vec(VecLoadPipelineWidth, Input(UInt(3.W)))
   val realFlowNum = Vec(VecLoadPipelineWidth, Input(UInt(5.W)))
   val loadPipeOut = Vec(VecLoadPipelineWidth, Decoupled(new VecLoadPipelineBundle))
@@ -143,6 +163,9 @@ class VlflowBundle(implicit p: Parameters) extends XSBundle {
   val reg_offset        = Vec(2,UInt(4.W)) //Which element to write
   val offset            = Vec(2,UInt(4.W))
   val alignedType       = UInt(2.W)
+  val exp               = Bool()
+  val flow_idx          = UInt(8.W)
+  val is_first_ele      = Bool()
 }
 
 class unitStrideBundle(implicit p: Parameters) extends XSBundle {
@@ -187,6 +210,11 @@ class VlflowQueue(implicit p: Parameters) extends XSModule with HasCircularQueue
   val mul         = Wire(Vec(VecLoadPipelineWidth, UInt(3.W)))
   val emulNum     = Wire(Vec(VecStorePipelineWidth, UInt(4.W)))
   val lmulNum     = Wire(Vec(VecStorePipelineWidth, UInt(4.W)))
+  val vma         = Wire(Vec(VecStorePipelineWidth, Bool()))
+  val vta         = Wire(Vec(VecStorePipelineWidth, Bool()))
+  val vl          = Wire(Vec(VecStorePipelineWidth, UInt(8.W)))
+  val vmask       = Wire(Vec(VecStorePipelineWidth, UInt(VLEN.W)))
+  val vstart      = Wire(Vec(VecStorePipelineWidth, UInt(8.W)))
   val segMulIdx   = Wire(Vec(VecLoadPipelineWidth, UInt(6.W)))
   val segNfIdx    = Wire(Vec(VecLoadPipelineWidth, UInt(6.W)))
   val alignedType = Wire(Vec(VecLoadPipelineWidth, UInt(2.W)))
@@ -328,6 +356,11 @@ class VlflowQueue(implicit p: Parameters) extends XSModule with HasCircularQueue
     mul(i)             := Mux(instType(i)(1,0) === "b00".U || instType(i)(1,0) === "b10".U,emul(i), Mux(emulNum(i) > lmulNum(i),emul(i),lmul(i)))
     emulNum(i)         := MulNum(emul(i))
     lmulNum(i)         := MulNum(lmul(i))
+    vma(i)             := Mux(io.whole_reg(i), false.B, io.loadRegIn(i).bits.uop.ctrl.vconfig.vtype.vma)
+    vta(i)             := Mux(io.whole_reg(i), false.B, io.loadRegIn(i).bits.uop.ctrl.vconfig.vtype.vta)
+    vl(i)              := Mux(io.whole_reg(i), OneRegNum(eew(i)) * io.uop_segment_num(i), io.loadRegIn(i).bits.uop.ctrl.vconfig.vl)
+    vmask(i)           := io.loadRegIn(i).bits.src(3)
+    vstart(i)          := io.loadRegIn(i).bits.uop.ctrl.vconfig.vstart
     instType(i)        := io.instType(i)
     baseAddr(i)        := io.loadRegIn(i).bits.src(0)
     dataWidth(i)       := io.loadRegIn(i).bits.uop.ctrl.vconfig.vl << eew(i)(1,0)// only unit-stride use
@@ -363,14 +396,25 @@ class VlflowQueue(implicit p: Parameters) extends XSModule with HasCircularQueue
           val uop = Wire(new MicroOp)
           val vdFlowIdx  = Wire(UInt(4.W))
           val vs2FlowIdx = Wire(UInt(4.W))
+          val eleIdx = Wire(UInt(7.W))
+          val eleIdxUnitStride = Wire(UInt(7.W))
+          val eleIdxNonUs = Wire(UInt(7.W))
           queueIdx := enqPtr(i).value + j.U
           flow_entry(i)(queueIdx) := DontCare
           uop := DontCare
           flow_entry_valid(i)(queueIdx) := true.B
-          flow_entry(i)(queueIdx).unit_stride_fof := io.uop_unit_stride_fof(i)
+          //flow_entry(i)(queueIdx).unit_stride_fof := io.uop_unit_stride_fof(i)
           flow_entry(i)(queueIdx).mask := GenVecLoadMask(instType = instType(i), emul = emul(i), eew = eew(i), sew = sew(i))
           flow_entry(i)(queueIdx).vaddr := vaddr
           flow_entry(i)(queueIdx).alignedType := alignedType(i)
+          eleIdxNonUs := GenEleIdx(instType = instType(i), emul = emul(i), lmul = lmul(i), eew = eew(i), sew = sew(i),
+            uopIdx = uopIdx(i), flowIdx = j.U)
+          eleIdxUnitStride := (VLEN.U >>  eew(i)(1,0)).asUInt * j.U + (vstart(i) >>  eew(i)(1,0)).asUInt
+          eleIdx := Mux(instType(i) === "b000".U, eleIdxUnitStride, eleIdxNonUs)
+          val exp = VLExpCtrl(vstart = vstart(i), vl = vl(i), eleIdx = eleIdx)
+          flow_entry(i)(queueIdx).exp := exp
+          flow_entry(i)(queueIdx).is_first_ele := (eleIdx === 0.U)
+          flow_entry(i)(queueIdx).flow_idx := eleIdx
 
           vaddr := GenVLAddr(instType = instType(i), baseaddr = baseAddr(i), emul = emul(i), lmul = lmul(i), uopIdx = uopIdx(i),
             flow_inner_idx = vs2FlowIdx, stride = stride(i), index = index(i), eew = eew(i), sew = sew(i),
@@ -456,6 +500,9 @@ class VlflowQueue(implicit p: Parameters) extends XSModule with HasCircularQueue
       io.loadPipeOut(i).bits.reg_offset          := flow_entry(i)(deqPtr(i).value).reg_offset
       io.loadPipeOut(i).bits.uop.lqIdx           := flow_entry(i)(deqPtr(i).value).uop.lqIdx
       io.loadPipeOut(i).bits.alignedType         := flow_entry(i)(deqPtr(i).value).alignedType
+      io.loadPipeOut(i).bits.exp                 := flow_entry(i)(deqPtr(i).value).exp
+      io.loadPipeOut(i).bits.is_first_ele        := flow_entry(i)(deqPtr(i).value).is_first_ele
+      io.loadPipeOut(i).bits.flow_idx            := flow_entry(i)(deqPtr(i).value).flow_idx
     }
   }
 

@@ -43,6 +43,7 @@ class VectorLoadWrapper (implicit p: Parameters) extends XSModule with HasCircul
   val isSegment   = Wire(Vec(VecLoadPipelineWidth, Bool()))
   val instType    = Wire(Vec(VecLoadPipelineWidth, UInt(3.W)))
   val uop_unit_stride_fof = Wire(Vec(VecLoadPipelineWidth, Bool()))
+  val uop_unit_whole_reg = Wire(Vec(VecLoadPipelineWidth, Bool()))
   val uop_segment_num = Wire(Vec(VecLoadPipelineWidth, Bool()))
   val realFlowNum     = Wire(Vec(VecLoadPipelineWidth, UInt(5.W)))
 
@@ -57,6 +58,7 @@ class VectorLoadWrapper (implicit p: Parameters) extends XSModule with HasCircul
     isSegment(i)           := loadInstDec(i).uop_segment_num =/= "b000".U && !loadInstDec(i).uop_unit_stride_whole_reg
     instType(i)            := Cat(isSegment(i), loadInstDec(i).uop_type)
     uop_unit_stride_fof(i) := loadInstDec(i).uop_unit_stride_fof
+    uop_unit_whole_reg(i) := loadInstDec(i).uop_unit_stride_whole_reg
     uop_segment_num(i)     := loadInstDec(i).uop_segment_num
     realFlowNum(i)         := GenRealFlowNum(instType = instType(i), emul = emul(i), lmul = lmul(i), eew = eew(i), sew = sew(i))
   }
@@ -82,11 +84,14 @@ class VectorLoadWrapper (implicit p: Parameters) extends XSModule with HasCircul
   vluopQueue.io.realFlowNum := realFlowNum
   vluopQueue.io.loadPipeIn <> io.loadPipleIn
   vluopQueue.io.vecLoadWriteback <> io.vecLoadWriteback
+  vluopQueue.io.fof := uop_unit_stride_fof
+  vluopQueue.io.whole_reg := uop_unit_whole_reg
   vlflowQueue.io.eew                 := eew
   vlflowQueue.io.sew                 := sew
   vlflowQueue.io.emul                := emul
   vlflowQueue.io.instType            := instType
   vlflowQueue.io.uop_unit_stride_fof := uop_unit_stride_fof
+  vlflowQueue.io.whole_reg := uop_unit_whole_reg
   vlflowQueue.io.uop_segment_num     := uop_segment_num
   vlflowQueue.io.realFlowNum         := realFlowNum
   vlflowQueue.io.loadPipeOut          <> io.loadPipeOut

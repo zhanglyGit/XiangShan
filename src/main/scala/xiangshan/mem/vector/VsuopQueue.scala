@@ -121,6 +121,7 @@ class VsUopQueue(implicit p: Parameters) extends XSModule with HasCircularQueueP
       vsUopEntry(enqPtr).emul     := emul(i)
       vsUopEntry(enqPtr).instType := instType(i)
       vsUopEntry(enqPtr).uop_unit_stride_fof := loadInstDec(i).uop_unit_stride_fof
+      vsUopEntry(enqPtr).uop_unit_whole_reg := loadInstDec(i).uop_unit_stride_whole_reg
       vsUopEntry(enqPtr).uop_segment_num := loadInstDec(i).uop_segment_num
     }
   }

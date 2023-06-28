@@ -18,6 +18,7 @@ package xiangshan.mem
 import chipsalliance.rocketchip.config.Parameters
 import chisel3._
 import chisel3.util._
+import org.scalatest.Assertions.===
 import utils._
 import utility._
 import xiangshan._
@@ -87,17 +88,28 @@ object GenVSAddr {
 }
 
 object VSMaskCtrl {
-  def apply (vstart: UInt, vl: UInt, eleIdx: UInt, vmask: UInt, mask: UInt):(UInt,Bool) = {
+  def apply (vstart: UInt, vl: UInt, eleIdx: UInt, vmask: UInt, mask: UInt, vma: Bool, vta: Bool) :(UInt,Bool) = {
     val vsMask = Wire(UInt(16.W))
     val exp = Wire(Bool())
     when (vstart >= vl || vl === 0.U) {
       vsMask := 0.U
       exp := false.B
     }.otherwise {
-      when (eleIdx >= vstart && eleIdx < vl && vmask(eleIdx)) {
-        vsMask := mask
+      when (eleIdx >= vstart && eleIdx < vl) {
         exp := true.B
-      }.otherwise {
+        when(vmask === false.B && vma === false.B) {
+          vsMask := 0.U
+        }.otherwise {
+          vsMask := mask
+        }
+      }.elsewhen(eleIdx >= vl) {
+        exp := false.B
+        when(vta === false.B) {
+          vsMask := 0.U
+        }.otherwise {
+          vsMask := "hff".U
+        }
+      }.otherwise{
         vsMask := 0.U
         exp := false.B
       }
@@ -119,12 +131,33 @@ object GenVSMask {
 }
 
 object GenVSData {
-    def apply(reg_offset: UInt, offset: UInt, data: UInt):UInt = {
+    def apply(reg_offset: UInt, offset: UInt, data: UInt,  vstart: UInt, vl: UInt, eleIdx: UInt, vmask: UInt, vma: Bool, vta: Bool):UInt = {
+      val vtmpData = Wire(UInt(128.W))
       val vData = Wire(UInt(128.W))
       when (offset <= reg_offset) {
-        vData := data >> ((reg_offset - offset) << 3.U)
+        vtmpData := data >> ((reg_offset - offset) << 3.U)
       }.otherwise {
-        vData := data << ((offset - reg_offset) << 3.U)
+        vtmpData := data << ((offset - reg_offset) << 3.U)
+      }
+
+      when( eleIdx >= vl) {
+        when(vta){
+          vData := "hfffffffff".U
+        }.otherwise{
+          vData := vtmpData
+        }
+      }.elsewhen(eleIdx >= vstart && eleIdx < vl) {
+        when(vmask(eleIdx)) {
+          vData := vtmpData
+        }.otherwise {
+          when(vma) {
+            vData := "hfffffffff".U
+          }.otherwise {
+            vData := vtmpData
+          }
+        }
+      }.otherwise{
+        vData := vtmpData
       }
       vData
     }
@@ -155,6 +188,13 @@ class VecFlowEntry (implicit p: Parameters) extends ExuInput(isVpu = true) {
   val uop_unit_stride_fof = Bool()
   val alignedType         = UInt(2.W)
   val reg_offset          = UInt(4.W)
+  val uop_idx             = UInt(6.W)
+  val vstart              = UInt(8.W)
+  val vl                  = UInt(8.W)
+  val eleIdx              = UInt(8.W)
+  val vmask               = UInt(16.W)
+  val vma                 = Bool()
+  val vta                 = Bool()
 
   def apply = {
     this.mask := 0.U((VLEN/8).W)//TODO:
@@ -175,6 +215,9 @@ class VsFlowBundle (implicit p: Parameters) extends XSBundle {
   val storePipeOut = Vec(VecStorePipelineWidth,Decoupled(new VecPipeBundle()))
   val isFirstIssue = Vec(VecStorePipelineWidth,Output(Bool()))
   val vsfqFeedback = Vec(VecStorePipelineWidth,Flipped(ValidIO(new VSFQFeedback)))
+  val issuePtrExt  = Input(new SqPtr)
+  val flowPtrExt   = Input(UInt(9.W))
+  val issueNum     = Output(UInt(3.W))
 }
 
 class VsFlowQueue(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHelper
@@ -210,6 +253,7 @@ class VsFlowQueue(implicit p: Parameters) extends XSModule with HasCircularQueue
   val segNfIdx        = Wire(Vec(VecStorePipelineWidth, UInt(6.W)))
   val segMulIdx       = Wire(Vec(VecStorePipelineWidth, UInt(6.W)))
   val canissue        = WireInit(VecInit(Seq.fill(VecStorePipelineWidth)(VecInit(Seq.fill(VsFlowSize)(false.B)))))
+  val stqAccept       = WireInit(VecInit(Seq.fill(VecStorePipelineWidth)(VecInit(Seq.fill(VsFlowSize)(false.B)))))
   //val deqMask         = Wire(Vec(VecStorePipelineWidth,UInt(VsFlowSize.W)))
   val deqIdx          = Wire(Vec(VecStorePipelineWidth,UInt(log2Ceil(VsFlowSize).W)))
   val uopInValid      = WireInit(VecInit(Seq.fill(VecStorePipelineWidth)(false.B)))
@@ -227,9 +271,9 @@ class VsFlowQueue(implicit p: Parameters) extends XSModule with HasCircularQueue
     * enqueue updata */
   for (i <- 0 until VecStorePipelineWidth) {
     uopIdx(i)          := io.uopIn(i).bits.uop.ctrl.uopIdx
-    vma(i)             := io.uopIn(i).bits.uop.ctrl.vconfig.vtype.vma
-    vta(i)             := io.uopIn(i).bits.uop.ctrl.vconfig.vtype.vta
-    vl(i)              := io.uopIn(i).bits.uop.ctrl.vconfig.vl
+    vma(i)             := Mux(io.uopIn(i).bits.uop_unit_whole_reg, false.B, io.uopIn(i).bits.uop.ctrl.vconfig.vtype.vma)
+    vta(i)             := Mux(io.uopIn(i).bits.uop_unit_whole_reg, false.B, io.uopIn(i).bits.uop.ctrl.vconfig.vtype.vta)
+    vl(i)              := Mux(io.uopIn(i).bits.uop_unit_whole_reg, OneRegNum(eew(i)) * io.uopIn(i).bits.uop_segment_num, io.uopIn(i).bits.uop.ctrl.vconfig.vl)
     vmask(i)           := io.uopIn(i).bits.src(3)
     eew(i)             := io.uopIn(i).bits.eew
     sew(i)             := io.uopIn(i).bits.uop.ctrl.vconfig.vtype.vsew
@@ -291,16 +335,24 @@ class VsFlowQueue(implicit p: Parameters) extends XSModule with HasCircularQueue
           }
 
           eleIdx := GenEleIdx(instType = instType(i), emul = emul(i), lmul = lmul(i), eew = eew(i), sew = sew(i), uopIdx = uopIdx(i), flowIdx = j.U)
-          val (vsmask,exp) = VSMaskCtrl(vstart = io.uopIn(i).bits.vstart, vl = vl(i), eleIdx = eleIdx, vmask = vmask(i), mask = io.uopIn(i).bits.mask)
+          val (vsmask,exp) = VSMaskCtrl(vstart = io.uopIn(i).bits.vstart, vl = vl(i), eleIdx = eleIdx, vmask = vmask(i),
+            mask = io.uopIn(i).bits.mask, vma = vma(i), vta = vta(i))
           //flowEntry(i)(enqValue).mask := io.uopIn(i).bits.mask << VSRegOffset(instType = instType(i), flowIdx = vdFlowIdx, eew = eew(i), sew = sew(i))
           flowEntry(i)(enqValue).reg_offset := VSRegOffset(instType = instType(i), flowIdx = vdFlowIdx, eew = eew(i), sew = sew(i))
           flowEntry(i)(enqValue).mask := vsmask << VSRegOffset(instType = instType(i), flowIdx = vdFlowIdx, eew = eew(i), sew = sew(i))
           flowEntry(i)(enqValue).alignedType := alignedType(i)
           flowEntry(i)(enqValue).exp := exp
+          flowEntry(i)(enqValue).uop_idx := uopIdx(i)
           flowEntry(i)(enqValue).src(0) := GenVSAddr(instType = instType(i), baseaddr = baseaddr(i), eleIdx = eleIdx, emul = emul(i),
                                                       lmul = lmul(i), uopIdx = uopIdx(i), flow_inner_idx = vs2FlowIdx,
                                                       stride = stride(i), index = index(i), eew = eew(i), sew = sew(i),
                                                       nf = uop_segment_num(i), segNfIdx = segNfIdx(i), segMulIdx = segMulIdx(i))
+          flowEntry(i)(enqValue).vstart := io.uopIn(i).bits.vstart
+          flowEntry(i)(enqValue).vl := vl(i)
+          flowEntry(i)(enqValue).eleIdx := eleIdx
+          flowEntry(i)(enqValue).vmask := vmask(i)
+          flowEntry(i)(enqValue).vma := vma(i)
+          flowEntry(i)(enqValue).vta := vta(i)
         }
       }
     }
@@ -309,8 +361,14 @@ class VsFlowQueue(implicit p: Parameters) extends XSModule with HasCircularQueue
 /**
   * issue control*/
   for (i <- 0 until VecStorePipelineWidth) {
-    canissue(i) := VecInit((0 until VsFlowSize).map(j => valid(i)(j) && !canDeq(i)(j) && !issued(i)(j) && counter(i)(j) === 0.U))
-    deqIdx(i)   := PriorityEncoder(canissue(i))
+    if (i == 0){
+      canissue(i) := VecInit((0 until VsFlowSize).map(j => valid(i)(j) && !canDeq(i)(j) && !issued(i)(j) && counter(i)(j) === 0.U && stqAccept(i)(j) && (io.flowPtrExt > 0.U)))
+      deqIdx(i) := PriorityEncoder(canissue(i))
+    }
+    if (i == 1) {
+      canissue(i) := VecInit((0 until VsFlowSize).map(j => valid(i)(j) && !canDeq(i)(j) && !issued(i)(j) && counter(i)(j) === 0.U && stqAccept(i)(j) && ((io.flowPtrExt - 1.U) > 0.U)))
+      deqIdx(i) := PriorityEncoder(canissue(i))
+    }
   }
 
   for (i <- 0 until VecStorePipelineWidth) {
@@ -323,12 +381,31 @@ class VsFlowQueue(implicit p: Parameters) extends XSModule with HasCircularQueue
                                               mask = flowEntry(i)(deqIdx(i)).mask)
     io.storePipeOut(i).bits.src(2) := GenVSData(reg_offset = flowEntry(i)(deqIdx(i)).reg_offset,
                                                 offset = flowEntry(i)(deqIdx(i)).src(0)(3,0),
-                                                data = flowEntry(i)(deqIdx(i)).src(2))
+                                                data = flowEntry(i)(deqIdx(i)).src(2),
+                                                vstart = flowEntry(i)(deqIdx(i)).vstart,
+                                                vl =  flowEntry(i)(deqIdx(i)).vl,
+                                                eleIdx = flowEntry(i)(deqIdx(i)).eleIdx,
+                                                vmask = flowEntry(i)(deqIdx(i)).vmask,
+                                                vma = flowEntry(i)(deqIdx(i)).vma,
+                                                vta = flowEntry(i)(deqIdx(i)).vta
+    )
     io.storePipeOut(i).bits.src(0)              := flowEntry(i)(deqIdx(i)).src(0)
     io.storePipeOut(i).bits.uop_unit_stride_fof := flowEntry(i)(deqIdx(i)).uop_unit_stride_fof
     io.storePipeOut(i).bits.alignedType         := flowEntry(i)(deqIdx(i)).alignedType
     io.storePipeOut(i).bits.exp                 := flowEntry(i)(deqIdx(i)).exp
     io.storePipeOut(i).bits.uop                 := flowEntry(i)(deqIdx(i)).uop
+  }
+
+  when(io.storePipeOut(0).valid && io.storePipeOut(1).valid){
+    io.issueNum := 2.U
+  }. elsewhen(io.storePipeOut(0).valid && !io.storePipeOut(1).valid){
+    io.issueNum := 1.U
+  }.elsewhen(!io.storePipeOut(0).valid && io.storePipeOut(1).valid) {
+    io.issueNum := 1.U
+  }.elsewhen(!io.storePipeOut(0).valid && !io.storePipeOut(1).valid) {
+    io.issueNum := 0.U
+  }.otherwise{
+    io.issueNum := 0.U
   }
 
   for (i <- 0 until VecStorePipelineWidth) {
@@ -350,6 +427,17 @@ class VsFlowQueue(implicit p: Parameters) extends XSModule with HasCircularQueue
         issued(i)(io.vsfqFeedback(i).bits.fqIdx) := false.B
         counter(i)(io.vsfqFeedback(i).bits.fqIdx) := 31.U
       }
+    }
+  }
+
+  /* when uop_idx <  issuePtrExt, the uop has been allocated in Stq */
+  for (i <- 0 until VecStorePipelineWidth) {
+    for (j <- 0 until 16)
+    //when(isBefore(flowEntry(i)(j).uop_idx, io.issuePtrExt)) {
+    when(flowEntry(i)(j).uop_idx < io.issuePtrExt.value) {
+      stqAccept(i)(j) := true.B
+    }.otherwise {
+      stqAccept(i)(j) := false.B
     }
   }
 

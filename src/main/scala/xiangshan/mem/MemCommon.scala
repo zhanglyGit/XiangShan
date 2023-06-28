@@ -102,6 +102,8 @@ class LsPipelineBundle(implicit p: Parameters) extends XSBundleWithMicroOp with 
   // Vector instruction
   val vec128bit = Bool()
   val exp       = Bool()
+  val is_first_ele = Bool()
+  val flow_index = UInt(8.W)
   val uop_unit_stride_fof = Bool()
   val rob_idx_valid       = Vec(2,Bool())
   val inner_idx           = Vec(2,UInt(3.W))
@@ -153,6 +155,8 @@ class LdPrefetchTrainBundle(implicit p: Parameters) extends LsPipelineBundle {
     isHWPrefetch := input.isHWPrefetch
     vec128bit := input.vec128bit
     exp       := input.exp
+    flow_index := input.flow_index
+    is_first_ele := input.is_first_ele
     //dataSize            := input.dataSize
     uop_unit_stride_fof := input.uop_unit_stride_fof
     rob_idx_valid       := input.rob_idx_valid

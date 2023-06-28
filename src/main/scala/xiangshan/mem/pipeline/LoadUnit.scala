@@ -132,6 +132,9 @@ class LoadUnit_S0(implicit p: Parameters) extends XSModule with HasDCacheParamet
   val s0_rob_idx             = WireInit(VecInit(Seq.fill(2)(0.U.asTypeOf(new RobPtr))))
   val s0_reg_offset          = WireInit(VecInit(Seq.fill(2)(0.U(4.W))))
   val s0_offset              = WireInit(VecInit(Seq.fill(2)(0.U(4.W))))
+  val s0_exp                 = WireInit(false.B)
+  val s0_is_first_ele        = WireInit(false.B)
+  val s0_flow_idx            = WireInit(0.U(8.W))
 
   val s0_replayShouldWait = io.in.valid && isAfter(io.replay.bits.uop.robIdx, io.in.bits.uop.robIdx) && !io.lqReplayFull
   // load flow select/gen
@@ -310,6 +313,10 @@ class LoadUnit_S0(implicit p: Parameters) extends XSModule with HasDCacheParamet
     s0_rob_idx             := io.vec_in.bits.rob_idx
     s0_reg_offset          := io.vec_in.bits.reg_offset
     s0_offset              := io.vec_in.bits.offset
+    s0_exp                 := io.vec_in.bits.exp
+    s0_is_first_ele        := io.vec_in.bits.is_first_ele
+    s0_flow_idx            := io.vec_in.bits.flow_idx
+
     val issueUopIsPrefetch = WireInit(LSUOpType.isPrefetch(io.in.bits.uop.ctrl.fuOpType))
     when (issueUopIsPrefetch) {
       isPrefetch := true.B
@@ -1304,6 +1311,9 @@ class LoadUnit(implicit p: Parameters) extends XSModule
   io.VecloadOut.bits.rob_idx        := s3_loadOutBits.rob_idx
   io.VecloadOut.bits.offset         := s3_loadOutBits.offset
   io.VecloadOut.bits.reg_offset     := s3_loadOutBits.reg_offset
+  io.VecloadOut.bits.excp           := s3_loadOutBits.exp
+  io.VecloadOut.bits.is_first_ele   := s3_loadOutBits.is_first_ele
+  io.VecloadOut.bits.excp_ele_index := s3_loadOutBits.flow_index
 
   io.lsq.loadOut.ready := !hitLoadOut.valid
 
