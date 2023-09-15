@@ -16,7 +16,7 @@
 
 package xiangshan.backend.decode
 
-import chipsalliance.rocketchip.config.Parameters
+import org.chipsalliance.cde.config.Parameters
 import chisel3._
 import chisel3.util._
 import freechips.rocketchip.rocket.Instructions
@@ -710,7 +710,7 @@ class DecodeUnitComp()(implicit p : Parameters) extends XSModule with DecodeUnit
           csBundle(i).uopIdx := i.U
         }
       }
-      when(simple.io.enq.vtype.vlmul.orR()) {
+      when(simple.io.enq.vtype.vlmul.orR) {
         csBundle(numOfUop - 1.U).srcType(2) := SrcType.vp
         csBundle(numOfUop - 1.U).lsrc(0) := src1
         csBundle(numOfUop - 1.U).lsrc(1) := VECTOR_TMP_REG_LMUL.U + numOfUop - 2.U
@@ -1646,7 +1646,7 @@ class DecodeUnitComp()(implicit p : Parameters) extends XSModule with DecodeUnit
     decodedInsts(i) := MuxCase(csBundle(i), Seq(
       (state === s_normal) -> csBundle(i),
       (state === s_ext) -> Mux((i.U + numOfUop -uopRes) < maxUopSize.U, csBundle(i.U + numOfUop - uopRes), csBundle(maxUopSize - 1))
-    ))
+    ).toSeq)
   }
 
 
@@ -1666,7 +1666,7 @@ class DecodeUnitComp()(implicit p : Parameters) extends XSModule with DecodeUnit
       dst := MuxCase(false.B, Seq(
         (io.validFromIBuf(0) && uopRes0 > readyCounter   ) -> Mux(readyCounter > i.U, true.B, false.B),
         (io.validFromIBuf(0) && !(uopRes0 > readyCounter)) -> Mux(complexNum > i.U, true.B, validSimple(i.U - complexNum) && notInfVec(i.U - complexNum) && io.readyFromRename(i)),
-      ))
+      ).toSeq)
   }
 
   readyToIBuf.zipWithIndex.foreach {
@@ -1674,7 +1674,7 @@ class DecodeUnitComp()(implicit p : Parameters) extends XSModule with DecodeUnit
       dst := MuxCase(true.B, Seq(
         (io.validFromIBuf(0) && uopRes0 > readyCounter) -> false.B,
         (io.validFromIBuf(0) && !(uopRes0 > readyCounter)) -> (if (i==0) true.B else Mux(RenameWidth.U - complexNum >= i.U, notInfVec(i - 1) && validSimple(i - 1) && io.readyFromRename(i), false.B)),
-      ))
+      ).toSeq)
   }
 
   io.deq.decodedInsts := decodedInsts
