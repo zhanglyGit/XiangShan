@@ -350,6 +350,7 @@ class Dispatch2IqMemImp(override val wrapper: Dispatch2Iq)(implicit p: Parameter
     (Seq(ldu), 2),
     (Seq(stu, mou), 2),
     (Seq(vldu), 2),
+    (Seq(vstu), 2)
   )
 
   private val enqLsqIO = io.enqLsqIO.get
@@ -409,7 +410,7 @@ class Dispatch2IqMemImp(override val wrapper: Dispatch2Iq)(implicit p: Parameter
   // enqLsq io
   require(enqLsqIO.req.size == enqLsqIO.resp.size)
   for (i <- enqLsqIO.req.indices) {
-    when (!io.in(i).valid) {
+    when (!io.in(i).valid || !io.in(i).bits.firstUop) {
       enqLsqIO.needAlloc(i) := 0.U
     }.elsewhen(isStoreAMOVec(i) || isVStoreVec(i)) {
       enqLsqIO.needAlloc(i) := 2.U // store | amo | vstore
