@@ -627,12 +627,28 @@ object FuConfig {
     maskWakeUp = true,
     dataBits = 128,
   )
-  //TODO
-  // def VstuCfg = FuConfig ()
+
+  val VstuCfg: FuConfig = FuConfig (
+    name = "vstu",
+    fuType = FuType.vstu,
+    fuGen = null,
+    srcData = Seq(
+      Seq(VecData(), VecData(), VecData(), MaskSrcData(), VConfigData()),  //vs1, vs2, vd_old, v0, vconfig
+    ),
+    piped = false,
+    writeVecRf = false,
+    latency = UncertainLatency(),
+    exceptionOut = Seq(storeAddrMisaligned, storeAccessFault, storePageFault),
+    flushPipe = true,
+    replayInst = true,
+    vconfigWakeUp = true,
+    maskWakeUp = true,
+    dataBits = 128,
+  )
 
   def allConfigs = Seq(
     JmpCfg, BrhCfg, I2fCfg, CsrCfg, AluCfg, MulCfg, DivCfg, FenceCfg, BkuCfg, VSetRvfWvfCfg, VSetRiWvfCfg, VSetRiWiCfg,
-    FmacCfg, F2iCfg, F2fCfg, FDivSqrtCfg, LduCfg, StaCfg, StdCfg, MouCfg, MoudCfg, VialuCfg, VipuCfg, VlduCfg,
+    FmacCfg, F2iCfg, F2fCfg, FDivSqrtCfg, LduCfg, StaCfg, StdCfg, MouCfg, MoudCfg, VialuCfg, VipuCfg, VlduCfg, VstuCfg,
     VfaluCfg, VfmaCfg, VfcvtCfg
   )
 

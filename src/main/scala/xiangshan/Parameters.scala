@@ -327,14 +327,14 @@ case class XSCoreParameters
     implicit val schdType: SchedulerType = VfScheduler()
     SchdBlockParams(Seq(
       IssueBlockParams(Seq(
-        ExeUnitParams("FEX0", Seq(F2fCfg, F2iCfg, VSetRvfWvfCfg), Seq(VfWB(port = 0, 0), IntWB(port = 0, 1)), Seq(Seq(VfRD(12, 0)), Seq(VfRD(13, 0)))),
+        ExeUnitParams("FEX0", Seq(F2fCfg, F2iCfg, VSetRvfWvfCfg), Seq(VfWB(port = 0, 0), IntWB(port = 0, 1)), Seq(Seq(VfRD(11, 0)), Seq(VfRD(12, 0)))),
       ), numEntries = IssueQueueSize, numEnq = 2),
       IssueBlockParams(Seq(
-        ExeUnitParams("VEX0", Seq(VialuCfg, VimacCfg, VppuCfg, VipuCfg), Seq(VfWB(port = 1, 0)), Seq(Seq(VfRD(1, 0)), Seq(VfRD(2, 0)), Seq(VfRD(3, 0)), Seq(VfRD(4, 0)), Seq(VfRD(5, 0)))),
+        ExeUnitParams("VEX0", Seq(VialuCfg, VimacCfg, VppuCfg, VipuCfg), Seq(VfWB(port = 1, 0)), Seq(Seq(VfRD(0, 0)), Seq(VfRD(1, 0)), Seq(VfRD(2, 0)), Seq(VfRD(3, 0)), Seq(VfRD(4, 0)))),
       ), numEntries = IssueQueueSize, numEnq = 2),
       IssueBlockParams(Seq(
-        ExeUnitParams("VEX1", Seq(VfaluCfg, VfmaCfg), Seq(VfWB(port = 2, 0), IntWB(port = 9, 0)), Seq(Seq(VfRD(1, 0)), Seq(VfRD(2, 0)), Seq(VfRD(3, 0)), Seq(VfRD(4, 0)), Seq(VfRD(5, 0)))),
-        ExeUnitParams("VEX2", Seq(VfaluCfg, VfmaCfg), Seq(VfWB(port = 3, 0), IntWB(port = 5, 1)), Seq(Seq(VfRD(7, 0)), Seq(VfRD(8, 0)), Seq(VfRD(9, 0)), Seq(VfRD(10, 0)), Seq(VfRD(11, 0)))),
+        ExeUnitParams("VEX1", Seq(VfaluCfg, VfmaCfg), Seq(VfWB(port = 2, 0), IntWB(port = 9, 0)), Seq(Seq(VfRD(0, 0)), Seq(VfRD(1, 0)), Seq(VfRD(2, 0)), Seq(VfRD(3, 0)), Seq(VfRD(4, 0)))),
+        ExeUnitParams("VEX2", Seq(VfaluCfg, VfmaCfg), Seq(VfWB(port = 3, 0), IntWB(port = 5, 1)), Seq(Seq(VfRD(5, 0)), Seq(VfRD(6, 0)), Seq(VfRD(7, 0)), Seq(VfRD(8, 0)), Seq(VfRD(9, 0)))),
       ), numEntries = 8, numEnq = 2),
       IssueBlockParams(Seq(
         ExeUnitParams("VEX3", Seq(VfdivCfg), Seq(VfWB(port = 5, 0)), Seq(Seq(VfRD(7, 0)), Seq(VfRD(8, 0)), Seq(VfRD(9, 0)), Seq(VfRD(10, 0)), Seq(VfRD(11, 0)))),
@@ -369,8 +369,10 @@ case class XSCoreParameters
         ExeUnitParams("STD1", Seq(StdCfg, MoudCfg), Seq(), Seq(Seq(IntRD(6, Int.MaxValue), VfRD(10, Int.MaxValue)))),
       ), numEntries = IssueQueueSize, numEnq = 2),
       IssueBlockParams(Seq(
-        ExeUnitParams("VLDU0", Seq(VlduCfg), Seq(VfWB(port = 6, 1)), Seq(Seq(VfRD(port = 0, 0)), Seq(VfRD(port = 1, 0)), Seq(VfRD(port = 2, 0)), Seq(VfRD(port = 3, 0)), Seq(VfRD(port = 4, 0)))),
-        ExeUnitParams("VLDU1", Seq(VlduCfg), Seq(VfWB(port = 7, 1)), Seq(Seq(VfRD(port = 5, 0)), Seq(VfRD(port = 6, 0)), Seq(VfRD(port = 7, 0)), Seq(VfRD(port = 8, 0)), Seq(VfRD(port = 9, 0)))),
+        ExeUnitParams("VLDU0", Seq(VlduCfg), Seq(VfWB(port = 6, 1)), Seq(Seq(VfRD(port = 2, 0)), Seq(VfRD(port = 3, 0)), Seq(VfRD(port = 4, 0)), Seq(VfRD(port = 5, 0)), Seq(VfRD(port = 6, 0)))),
+      ), numEntries = IssueQueueSize, numEnq = 2),
+      IssueBlockParams(Seq(
+        ExeUnitParams("VSTU0", Seq(VstuCfg), Seq(), Seq(Seq(VfRD(port = 7, Int.MaxValue)), Seq(VfRD(port = 8, Int.MaxValue)), Seq(VfRD(port = 9, Int.MaxValue)), Seq(VfRD(port = 10, Int.MaxValue)), Seq(VfRD(port = 11, Int.MaxValue)))),
       ), numEntries = IssueQueueSize, numEnq = 2),
     ),
       numPregs = intPreg.numEntries max vfPreg.numEntries,

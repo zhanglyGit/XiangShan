@@ -70,6 +70,7 @@ case class BackendParams(
   def StdCnt = allSchdParams.map(_.StdCnt).sum
   def LduCnt = allSchdParams.map(_.LduCnt).sum
   def VlduCnt = allSchdParams.map(_.VlduCnt).sum
+  def VstuCnt = allSchdParams.map(_.VstuCnt).sum
   def LsExuCnt = StaCnt + LduCnt
   def JmpCnt = allSchdParams.map(_.JmpCnt).sum
   def BrhCnt = allSchdParams.map(_.BrhCnt).sum
@@ -84,7 +85,8 @@ case class BackendParams(
 
   def numNoDataWB = allSchdParams.map(_.numNoDataWB).sum
   def numExu = allSchdParams.map(_.numExu).sum
-  def vconfigPort = 0 // Todo: remove it
+  def vconfigPort = 13 // Todo: remove it
+  def vldPort = 14
 
   def numException = allExuParams.count(_.exceptionOut.nonEmpty)
 
@@ -219,7 +221,10 @@ case class BackendParams(
   }
 
   def getRfReadSize(dataCfg: DataConfig) = {
-    this.getPregParams(dataCfg).numRead.getOrElse(this.getRdPortIndices(dataCfg).size)
+    dataCfg match{
+      case IntData() =>  this.getPregParams(dataCfg).numRead.getOrElse(this.getRdPortIndices(dataCfg).size)
+      case VecData() => this.getPregParams(dataCfg).numRead.getOrElse(this.getRdPortIndices(dataCfg).size) + 2
+    }
   }
 
   def getRfWriteSize(dataCfg: DataConfig) = {
