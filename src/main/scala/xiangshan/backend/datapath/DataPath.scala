@@ -6,6 +6,7 @@ import chisel3.util._
 import difftest.{DiffArchFpRegState, DiffArchIntRegState, DiffArchVecRegState, DifftestModule}
 import freechips.rocketchip.diplomacy.{LazyModule, LazyModuleImp}
 import utility._
+import utils._
 import utils.SeqUtils._
 import xiangshan._
 import xiangshan.backend.BackendParams
@@ -338,6 +339,14 @@ class DataPathImp(override val wrapper: DataPath)(implicit p: Parameters, params
       // IQ(s0) --[Data]--> s1Reg ---------- end
     }
   }
+  private val intRdArb_cancel: Seq[Bool] = intRFReadReq.flatten.zip(intRdArbWinner.flatten).map{ case (x, y) =>
+      VecInit(x.zip(y).map(z => z._1.valid && !z._2)).asUInt.orR
+  }
+  private val intRdArb_cancel1 = intRFReadReq.flatten.zip(intRdArbWinner.flatten).map { case (x, y) =>
+    (VecInit(x.zip(y).map(z => z._1.valid && !z._2)).asUInt =/= 0.U) && !VecInit(x.zip(y).map(z => z._1.valid && !z._2)).asUInt.andR
+  }
+  XSPerfAccumulate("intRdArb_cancel", PopCount(intRdArb_cancel))
+  XSPerfAccumulate("intRdArb_cancel1", PopCount(intRdArb_cancel1))
 
   private val fromIQFire = fromIQ.map(_.map(_.fire))
   private val toExuFire = toExu.map(_.map(_.fire))
